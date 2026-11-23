@@ -1,3 +1,11 @@
+export function insideDownloadedArea(download, view) {
+  if (!download?.length || !view?.length) return false;
+  // Both views are split at the antimeridian. Allow sub-millimetre camera rounding.
+  const epsilon = 1e-9;
+  return view.every(([w, s, e, n]) => download.some(([west, south, east, north]) =>
+    w >= west - epsilon && s >= south - epsilon && e <= east + epsilon && n <= north + epsilon));
+}
+
 // MapLibre may return repeated worlds outside [-180, 180].
 export function windows(west, south, east, north) {
   south = Math.max(-90, south);

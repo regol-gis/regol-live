@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { text } from "node:stream/consumers";
 import sirv from "sirv";
 import { checkGobArea } from "./gob-area.mjs";
+import { checkHostedPages } from "./hosted-pages.mjs";
 import { checkNative } from "./native-browser.mjs";
 import { checkMapExport } from "./map-export.mjs";
 import { checkPanCache } from "./pan-cache.mjs";
@@ -738,6 +739,7 @@ try {
   );
   assert.equal(await paused.textContent("#count"), String(all));
   await paused.close();
+  await checkHostedPages(browser, base);
   console.log(
     "Browser checks passed for selectors, cached ranges and views, overlapping features, spatial references, custom sources and mobile layout.",
   );

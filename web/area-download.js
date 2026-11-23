@@ -70,6 +70,7 @@ export class AreaDownload {
       }
     }
     if (starts.size > maxHeaders) throw Error("Zoom in to download fewer tiles.");
+    this.plannedWindows = windows;
     const headerBlocks = new Set([...starts].map((p) => align(p, blockBytes)));
     for (const p of this.headers.keys()) {
       const inDirectory = p < catalog.directory[1] && p + blockBytes > catalog.directory[0];
@@ -107,5 +108,6 @@ export class AreaDownload {
       if (!this.pages.has(page)) ahead.pages.delete(page);
     for (const [page, bytes] of buffers) ahead.pages.set(page, bytes);
     ahead.pinned = this.pages;
+    this.downloadedWindows = this.plannedWindows;
   }
 }

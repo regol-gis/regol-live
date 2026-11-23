@@ -59,7 +59,7 @@ export async function checkGobArea(browser, base) {
       const request = { windows: [[-1, -1, 1, 1]], selector: "nwr" };
       const worker = new Worker("/worker.js", { type: "module" });
       let id = 0;
-      function requestWorker(type, terminal, next = true, query = request) {
+      function requestWorker(type, terminal, next = true, query = request, downloadedOnly = false) {
         return new Promise((resolve, reject) => {
           const watchdog = setTimeout(() => reject(Error("GOB worker timed out on " + type)), 15000);
           worker.onerror = (e) => { clearTimeout(watchdog); reject(Error(e.message)); };
@@ -69,14 +69,18 @@ export async function checkGobArea(browser, base) {
               clearTimeout(watchdog); reject(Error(data.message || data.type));
             }
           };
-          worker.postMessage({ id: next ? ++id : id, url, type, request: query, publicPlanet: true,
+          worker.postMessage({ id: next ? ++id : id, url, type, request: query, publicPlanet: true, downloadedOnly,
             areaIndex: new URL("/datasets/planet.gol.areas", location.href).href });
         });
       }
       try {
+        const noDownload = await requestWorker("query", "outside-download", true, request, true);
         const direct = await requestWorker("query", "result");
         const plan = await requestWorker("plan-area", "area-estimate");
         const ready = await requestWorker("confirm-area", "area-ready", false);
+        const inside = await requestWorker("query", "result", true, request, true);
+        const outside = await requestWorker("query", "outside-download", true,
+          { ...request, readWindows: [[-10,-10,10,10]] }, true);
         const suggestions = await requestWorker("suggest-tags", "suggestions");
         const { parseOverpass } = await import("/overpass.js");
         const namedQuery = async selector => requestWorker("query", "result", true, { windows: request.windows,
@@ -87,10 +91,14 @@ export async function checkGobArea(browser, base) {
         const moved = await namedQuery('area[name="Two Shells"]');
         const imported = await requestWorker("query", "result");
         const cached = await requestWorker("estimate-area", "area-estimate");
-        return { direct, plan, ready, suggestions, named, retagged, renamed, moved, imported, cached };
+        return { noDownload, direct, plan, ready, inside, outside, suggestions, named, retagged, renamed, moved, imported, cached };
       } finally { worker.terminate(); }
     }, planetURL);
     const { direct, plan, ready, suggestions, named, retagged, renamed, moved, imported, cached } = result;
+    assert.equal(result.noDownload.type, "outside-download");
+    assert.equal(result.inside.transport, "gob");
+    assert.equal(result.inside.gets, 0);
+    assert.equal(result.outside.type, "outside-download");
     assert.notEqual(direct.transport, "gob", "querying before activation uses the direct reader");
     const length = gob.readUInt32LE(68);
     assert.equal(plan.transport, "gob");

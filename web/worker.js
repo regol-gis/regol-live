@@ -7,9 +7,12 @@ import {
 import { ViewportReadAhead } from "./read-ahead.js";
 import { areaIndexFiles, hasNamedAreas } from "./named-areas.js";
 import { AreaDownload } from "./area-download.js";
+import { insideDownloadedArea } from "./viewport.js";
+import { hostedPages, checkParentLookups } from "./site-mode.js";
 import { GobArea, GobQueryError, golPlanetSnapshot } from "./gob-area.js";
 let api, source, ahead, areaDownload, snapshot, stats, job, timings, transferError, lastProgress;
 let gobCatalog, gobActive, wasmModule;
+let downloadTransport;
 let gobRetryAt = 0;
 const utf8 = new TextDecoder();
 const encoder = new TextEncoder();
@@ -93,6 +96,15 @@ async function open(url, localFile) {
       try {
         if (suggestionStopped()) return 0;
         const start = Number(offset);
+        if (job.downloadedOnly) {
+          const cached = ahead.get(start, length);
+          if (!cached) {
+            job.missingPage = true;
+            return 0;
+          }
+          new Uint8Array(api.memory.buffer, destination, length).set(cached);
+          return 1;
+        }
         let page =
           ahead.get(start, length) ?? (await source.cached(start, length));
         if (!job.suggestion && !job.area && !job.locate && !sparse && !page && start !== 0 && !source.first) {
@@ -237,15 +249,20 @@ async function gobDownload(data, area) {
     }
     const entries = gobCatalog.plan(job.windows);
     const estimate = gobCatalog.estimate(entries);
-    const details = { snapshot: gobCatalog.snapshot, transport: "gob" };
+    const covered = downloadTransport === "gol"
+      ? source?.url === data.url && !source.invalidated && insideDownloadedArea(areaDownload?.downloadedWindows, job.windows)
+      : gobCatalog === gobActive && insideDownloadedArea(gobActive?.downloadedWindows, job.windows);
+    const details = { snapshot: gobCatalog.snapshot, transport: "gob", covered };
     confirmed = await confirmArea(data, area, estimate, details);
     if (confirmed) {
       const before = stats.bytes;
       const downloaded = await gobCatalog.download(entries, signal);
       signal.throwIfAborted();
       gobActive = gobCatalog = downloaded;
+      gobActive.downloadedWindows = job.windows;
+      downloadTransport = "gob";
       send({
-        type: "area-ready", ...details, ...estimate,
+        type: "area-ready", ...details, ...estimate, covered: entries.length > 0,
         bytes: stats.bytes - before,
         wasmMemoryBytes: gobActive.api.memory.buffer.byteLength,
       });
@@ -281,10 +298,11 @@ function sendResult(value, resultBytes, currentSnapshot, start, transport) {
 }
 
 async function gobQuery(start, request) {
+  if (job.downloadedOnly && !insideDownloadedArea(gobActive.downloadedWindows, job.windows)) return false;
   try {
     const entries = gobActive.plan(job.windows);
     if (entries.length && entries.every(({ loaded }) => loaded)) {
-      const { value, resultBytes, engineMs } = await gobActive.query(request, () => job.limit - stats.bytes);
+      const { value, resultBytes, engineMs } = await gobActive.query(request, () => job.downloadedOnly ? 0 : job.limit - stats.bytes);
       job.engineMs = engineMs;
       sendResult(value, resultBytes, gobActive.snapshot, start, "gob");
       return true;
@@ -324,6 +342,7 @@ async function run(data, area, suggestion) {
     id: data.id,
     area,
     areaIndex: data.areaIndex,
+    downloadedOnly: data.downloadedOnly === true,
     suggestion,
     allowance,
     locate: data.locate,
@@ -355,6 +374,7 @@ async function run(data, area, suggestion) {
       );
     }
     area?.controller.signal.throwIfAborted();
+    if (hostedPages) checkParentLookups(data.request.sets);
     if (suggestion) {
       suggestion.controller.signal.throwIfAborted();
       suggestion.until = start + 1200;
@@ -365,16 +385,23 @@ async function run(data, area, suggestion) {
     const indexedAreas = !area && !data.locate && !suggestion &&
       hasNamedAreas(data.request);
     const request = area || data.locate ? null : encoder.encode(JSON.stringify(data.request));
+    if (job.downloadedOnly && (data.locate || indexedAreas || !job.windows.length))
+      return send({ type: "outside-download" });
+    if (job.downloadedOnly && data.request.readWindows)
+      job.windows = [...data.request.windows, ...job.windows];
     if (publicPlanet && !suggestion) {
       if (area && (data.type === "plan-area" || performance.now() >= gobRetryAt)) {
         if (await gobDownload(data, area)) return;
       }
-      if (request && gobActive) {
+      if (request && gobActive && (!job.downloadedOnly || downloadTransport === "gob")) {
         // A named area can be outside every tile in the downloaded GOB view.
         if (indexedAreas) refreshGolForFallback(gobActive);
         else if (await gobQuery(start, request)) return;
+        else if (job.downloadedOnly) return send({ type: "outside-download" });
       }
     }
+    if (job.downloadedOnly && (downloadTransport !== "gol" || !api || source.url !== data.url || source.invalidated ||
+        !insideDownloadedArea(areaDownload?.downloadedWindows, job.windows))) return send({ type: "outside-download" });
     usingGol = true;
     if (!api || source.url !== data.url || source.invalidated) {
       if (area) area.opening = true;
@@ -395,11 +422,13 @@ async function run(data, area, suggestion) {
         return ptr ? new Uint8Array(api.memory.buffer, ptr, length) : null;
       }, data.localFile === true);
       const estimate = await areaDownload.plan(job.windows);
-      if (!await confirmArea(data, area, estimate, { snapshot })) return;
+      const covered = downloadTransport === "gol" && insideDownloadedArea(areaDownload.downloadedWindows, job.windows);
+      if (!await confirmArea(data, area, estimate, { snapshot, covered })) return;
       const before = stats.bytes;
       await areaDownload.download();
+      downloadTransport = "gol";
       signal.throwIfAborted();
-      send({ type: "area-ready", snapshot, ...estimate, bytes: stats.bytes - before });
+      send({ type: "area-ready", snapshot, ...estimate, covered: estimate.tiles > 0, bytes: stats.bytes - before });
       return;
     }
     if (data.locate) {
@@ -426,8 +455,10 @@ async function run(data, area, suggestion) {
     } finally {
       job.engineMs = Math.max(0, performance.now() - queryStart - job.pageMs);
     }
+    if (job.missingPage) return send({ type: "outside-download" });
     sendResult(result(resultBytes), resultBytes, snapshot, start);
   } catch (error) {
+    if (job.missingPage) return send({ type: "outside-download" });
     // On an interrupted transfer or failed open the next job gets a fresh source.
     if (usingGol && (transferError || source?.invalidated || error instanceof WebAssembly.RuntimeError))
       api = null;

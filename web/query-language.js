@@ -1,3 +1,5 @@
+import { hostedPages, parentsOfMessage } from "./site-mode.js";
+
 // GOQL inside tag brackets remains opaque to the spatial query language.
 export const predicates = new Map([
   ["intersects", "Intersects"],
@@ -18,6 +20,7 @@ export const setPredicates = new Map([
 export function takesRole(predicate) {
   return predicate === "parents_of" || predicate === "members_of";
 }
+if (hostedPages) setPredicates.delete("parents_of");
 const namePattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 function diagnostic(text, start, end, message, details) {
   const lines = text.slice(0, start).split("\n");
@@ -114,6 +117,8 @@ function parseFilter(text, problem) {
     return { predicate: "where", tags };
   }
   const op = /^[a-z_]\w*/i.exec(text)?.[0];
+  if (hostedPages && op === "parents_of")
+    throw problem(op, parentsOfMessage);
   if (!op || !(predicates.has(op) || setPredicates.has(op))) {
     if (text.startsWith("[")) throw Error("Use where before tag brackets, for example | where [name].");
     throw Error(`Unknown filter ${JSON.stringify(op ?? text)}. Use where [name], within($parks), or another filter from Query syntax.`);
@@ -357,3 +362,4 @@ export const examples = new Map([
     "$parks = a[leisure=park,garden]\n$benches = n[amenity=bench]\n  | within($parks)\n$cafes = na[amenity=cafe]\n  | within_distance($benches, 150)\nshow($benches, $cafes)",
   ],
 ]);
+if (hostedPages) examples.delete("Bus routes serving selected stops");

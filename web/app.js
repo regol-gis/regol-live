@@ -2,6 +2,7 @@ import { executionPlan, emptyReferenceNotes } from "./query-plan.js";
 import localDatasets from "./local-datasets.js";
 import { planetURL } from "./ranges.js";
 import { hostedPlanetIndexURL } from "./named-areas.js";
+import { hostedPages } from "./site-mode.js";
 import {
   examples,
   parseDraft,
@@ -29,6 +30,7 @@ import {
 const $ = (id) => document.getElementById(id);
 const native = localDatasets.find((item) => item.native);
 const backend = native ? new NativeQueries() : new RangeQueries();
+const downloadGatesPan = hostedPages && !native;
 if (native) {
   $("about-standalone").hidden = true;
   $("about-native").hidden = false;
@@ -115,12 +117,19 @@ const completion = initTagCompletion({
 let timeoutTimer;
 const drafts = { regol: examples.get("Cafés"), overpass: overpassExamples.get("Cafés") };
 let areaEstimate = null, areaTimer, checkingArea = false;
+let panPreferred = $("auto").checked, pendingPan = false;
 const decimalMB = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 const megabytes = (bytes) =>
   (bytes > 0 && bytes < 10000 ? "<0.01" : decimalMB.format(bytes / 1_000_000)) + " MB";
 
 function showAreaSize(estimate, hint = "Checking size…", retry = false) {
   areaEstimate = estimate;
+  if (downloadGatesPan) {
+    $("auto").disabled = !estimate?.covered;
+    $("auto").checked = Boolean(estimate?.covered && panPreferred);
+    $("auto").parentElement.title = estimate?.covered ? "Update results inside the downloaded area" :
+      "Download this area to enable updates on pan";
+  }
   const button = $("download-area");
   const size = estimate ? megabytes(estimate.missing) + " / " + megabytes(estimate.total) : hint;
   $("area-size").textContent = size;
@@ -128,7 +137,8 @@ function showAreaSize(estimate, hint = "Checking size…", retry = false) {
     ? megabytes(estimate.missing) + " remaining of " + megabytes(estimate.total)
     : hint;
   button.setAttribute("aria-label", "Download this area. " + button.title);
-  button.disabled = !ready || busy || !(estimate ? estimate.missing > 0 : retry);
+  button.disabled = !ready || busy || !(estimate ? estimate.missing > 0 ||
+    (downloadGatesPan && estimate.tiles > 0 && !estimate.covered) : retry);
 }
 
 function cancelAreaCheck(reuseSource) {
@@ -171,6 +181,10 @@ function scheduleAreaCheck(clear = false) {
       } else if (data.type === "area-estimate") {
         checkingArea = false;
         showAreaSize(data);
+        if (pendingPan) {
+          pendingPan = false;
+          if (data.covered && panPreferred && !sketch) run("pan");
+        }
       }
     }, fail);
   }, 350);
@@ -578,6 +592,9 @@ async function downloadResults() {
 }
 
 async function run(reason = "manual") {
+  if (reason === "pan" && downloadGatesPan && !areaEstimate?.covered) return;
+  pendingPan = false;
+  const submittedCamera = cameraMoves;
   // An automatic camera update can arrive while someone is composing a new
   // query (including just after the initial native view loads).
   if (reason === "pan" && document.activeElement === editor && editor.value !== display?.program) return;
@@ -601,6 +618,10 @@ async function run(reason = "manual") {
     request = await makeRequest();
     if (current !== generation) return;
     compiling = false;
+    if (reason === "pan" && downloadGatesPan && submittedCamera !== cameraMoves) {
+      setBusy(false);
+      return;
+    }
   } catch (error) {
     if (current !== generation) return;
     compiling = false;
@@ -619,7 +640,8 @@ async function run(reason = "manual") {
   const originalCamera = cameraMoves;
   if (!display?.matches(url, request))
     resetDisplay(new DisplayCache(url, request));
-  const cached = reason === "pan" ? display.recall(request.windows) : null;
+  // Explicit Overpass extents may leave the viewport. Let the worker verify their tiles.
+  const cached = reason === "pan" && !(downloadGatesPan && overpassMode) ? display.recall(request.windows) : null;
   locatingURL = locate ? url : null;
   const emptyMessage = request.show.includes("geometry")
     ? "Map geometry shown. "
@@ -681,6 +703,10 @@ async function run(reason = "manual") {
           units(data.bytes),
       );
     setBusy(false);
+    if (data.type === "outside-download") {
+      status("This query needs data outside the download. Choose Run query to search manually.");
+      return;
+    }
     if (data.timings) {
       const t = data.timings;
       const ms = (value) => Math.round(value).toLocaleString() + " ms";
@@ -782,6 +808,7 @@ async function run(reason = "manual") {
       locate,
       url,
       request,
+      downloadedOnly: downloadGatesPan && reason === "pan",
       pauseAtTransferLimit: true,
       areaIndex: areaIndex && new URL(areaIndex, location.href).href,
       localFile: localSource()?.localFile === true,
@@ -1004,6 +1031,7 @@ function showCamera() {
   $("zoom").textContent = "Zoom " + zoom.toFixed(1);
 }
 function changedSource() {
+  pendingPan = false;
   completion.close();
   positionedURL = null;
   stop(true);
@@ -1045,7 +1073,11 @@ $("cancel").onclick = () => {
 $("more").onclick = showMore;
 $("export-results").onclick = downloadResults;
 $("export-format").onchange = updateExportButton;
-$("auto").onchange = () => clearTimeout(panTimer);
+$("auto").onchange = () => {
+  panPreferred = $("auto").checked;
+  pendingPan = false;
+  clearTimeout(panTimer);
+};
 $("close-detail").onclick = closeDetail;
 $("prev-hit").onclick = () => stepPick(-1);
 $("next-hit").onclick = () => stepPick(1);
@@ -1141,12 +1173,29 @@ document.addEventListener("keydown", (e) => {
   }
 });
 setBusy(false);
+if (downloadGatesPan) {
+  for (const item of document.querySelectorAll("[data-parent-filter]")) item.hidden = true;
+  $("about-pan").textContent = "Update on pan works inside your downloaded area. Choose Run query to search elsewhere.";
+  const intro = $("intro-dialog");
+  const key = "regol-live.intro-seen";
+  let seen = false;
+  try { seen = localStorage.getItem(key) === "1"; } catch {}
+  if (!seen) {
+    intro.addEventListener("close", () => {
+      if (!$("download-area").disabled) $("download-area").focus();
+    }, { once: true });
+    intro.showModal();
+    try { localStorage.setItem(key, "1"); } catch {}
+  }
+}
 try {
   initMap({
     initialView: configuredView() ?? { center: [0, 0], zoom: 1 },
     onMoveStart() {
       if (document.activeElement !== editor) completion.close();
       cameraMoves++;
+      pendingPan = false;
+      clearTimeout(panTimer);
       if (locatingURL) positionedURL = locatingURL;
       if (!native && !$("area-dialog").open) {
         cancelAreaCheck();
@@ -1165,10 +1214,11 @@ try {
       showCamera();
       if (document.activeElement === editor) completion.refresh();
       if ($("area-dialog").open) return;
+      pendingPan = downloadGatesPan && !event?.datasetView && queriesActive && panPreferred && !sketch;
       scheduleAreaCheck(true);
       if (event?.datasetView) return;
       clearTimeout(panTimer);
-      if (queriesActive && ready && $("auto").checked && !sketch)
+      if (!downloadGatesPan && queriesActive && ready && $("auto").checked && !sketch)
         panTimer = setTimeout(() => run("pan"), 200);
     },
     onClick: mapClick,

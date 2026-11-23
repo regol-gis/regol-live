@@ -4,7 +4,7 @@ Regol Live explores OpenStreetMap data in GeoDesk GOL files. Write GOQL or Overp
 
 ## Explore the planet
 
-Open **[live.regol.org](https://live.regol.org/)**, move the map to an area of interest and select **Run query**. The standalone site runs Regol in your browser and reads the OpenPlanetData planet through HTTP byte ranges. **Download this area** caches GOB tiles for the visible region. A small Monaco dataset is also available in the dataset picker.
+Open **[live.regol.org](https://live.regol.org/)**, move the map to an area of interest and choose **Download this area** to review the size and cache the visible tiles. Select **Run query** to search. **Update on pan** can refresh results within the download. Outside it you can still run a query manually. The standalone site runs Regol in your browser using the OpenPlanetData planet GOL and GOB. A small Monaco dataset is also available in the dataset picker.
 
 Choose **Overpass QL** and run this query to count attractions inside Disneyland, from any map viewport.
 

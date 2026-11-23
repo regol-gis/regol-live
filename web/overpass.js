@@ -1,3 +1,5 @@
+import { hostedPages, checkParentLookups } from "./site-mode.js";
+
 export const overpassExamples = new Map([
   ["Cafés", 'nwr["amenity"="cafe"]({{bbox}});\nout geom;'],
   [
@@ -50,6 +52,7 @@ foreach.turbines->.turbine {
     '(\n  nwr["amenity"="library"]({{bbox}});\n  nwr["shop"="books"]({{bbox}});\n);\nout geom;',
   ],
 ]);
+if (hostedPages) overpassExamples.delete("Routes serving stops in view");
 
 let worker;
 let nextID = 0;
@@ -74,8 +77,10 @@ function parserWorker() {
   return worker;
 }
 
-export function parseOverpass(text, viewport, native = false) {
-  return compile({ text, viewport }, native, "overpass/compile");
+export async function parseOverpass(text, viewport, native = false) {
+  const plan = await compile({ text, viewport }, native, "overpass/compile");
+  if (hostedPages && !native) checkParentLookups(plan.sets);
+  return plan;
 }
 
 let lastValidation;

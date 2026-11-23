@@ -2,7 +2,7 @@
 
 ## Query a viewport
 
-In standalone mode, you can pan, choose a dataset or edit a query before the first search. Click **Run query**, press Ctrl/Cmd+Enter in the editor, or choose **Apply and run** in the query builder to start. After that, **Update on pan** evaluates the query in the new viewport and keeps the previous map visible while it loads. The native server runs the initial query when the map opens.
+In standalone mode, you can pan, choose a dataset or edit a query before the first search. Click **Run query**, press Ctrl/Cmd+Enter in the editor, or choose **Apply and run** in the query builder to start. On the hosted site, **Download this area** enables **Update on pan** while the entire viewport is inside the download. Choose **Run query** to search elsewhere. The native server runs the initial query when the map opens and can update on pan throughout the local GOL.
 
 Beside **Results**, choose **GeoJSON**, **KML**, or **CSV (WKT)** and click **Export**. The download contains all matches in the current result list, including rows behind **Show more**, with WGS 84 geometries, typed OSM IDs and query set names. Overpass `out center;` exports points, and `out count;` produces a summary without feature rows. An explicitly shown `$geometry` is included as a separate feature. Partial downloads have `-partial` in the filename. GeoJSON and KML expose OSM attributes as `tag:<key>` fields. CSV stores geometry in `WKT` and all original tags in `tags_json`.
 
@@ -23,7 +23,7 @@ Programs with named declarations end with an explicit `show(...)`. Change the la
 
 Use `except($set)` to subtract features by OSM type and ID. For example, `$far = $cafes | except($near)` keeps the cafés outside your earlier selection. Distance and membership examples use the features selected in the current map view.
 
-Use `parents_of($set)` for ways or relations containing a selected member, and `members_of($set)` for their immediate children. Both accept an optional double-quoted relation role. Omitting the role matches any link, including way–node links. An explicit `""` matches relation members whose stored role is empty. Expanding a way’s nodes requires the corresponding feature records in the GOL.
+Use `members_of($set)` for the immediate children of ways or relations. To find ways or relations containing a selected member, use `parents_of($set)` with the local server. This also applies to Overpass parent lookups such as `rel(bn.stops)`. Both membership filters accept an optional double-quoted relation role. Omitting the role matches any link, including way–node links. An explicit `""` matches relation members whose stored role is empty. Expanding a way’s nodes requires the corresponding feature records in the GOL.
 
 ```text
 $stops = n[public_transport=stop_position]

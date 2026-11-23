@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { windows } from "../web/viewport.js";
+import { insideDownloadedArea, windows } from "../web/viewport.js";
 import { RangeFile, readBody } from "../web/ranges.js";
 
 test("wrapped and whole-world views remain within valid GOL query bounds", () => {
@@ -35,4 +35,12 @@ test("rejects a full file and detects a changing or displaced range", async (t) 
   await assert.rejects(file.read(131072, 8), /changed/);
   fetch.mock.mockImplementation(async () => response(0, 7, '"first"'));
   await assert.rejects(file.read(131072, 8), /different range/);
+});
+
+test("automatic queries require every viewport segment to fit the confirmed download", () => {
+  const download = [[170,-10,180,10],[-180,-10,-170,10]];
+  assert(insideDownloadedArea(download, [[175,-2,180,2],[-180,-2,-175,2]]));
+  assert(!insideDownloadedArea(download, [[175,-2,180,2],[-180,-2,-169,2]]));
+  assert(!insideDownloadedArea(download, [[0,-2,1,2]]));
+  assert(!insideDownloadedArea(undefined, download));
 });

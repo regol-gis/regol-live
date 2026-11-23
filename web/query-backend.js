@@ -19,7 +19,7 @@ export class RangeQueries {
       }
       if (data.id !== this.id || !this.foreground) return;
       const { receive, estimateOnly } = this.foreground;
-      if (["result", "view", "area-ready", "error"].includes(data.type) ||
+      if (["result", "view", "area-ready", "outside-download", "error"].includes(data.type) ||
           (estimateOnly && data.type === "area-estimate")) {
         this.foreground = null;
         this.area = false;

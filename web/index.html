@@ -147,12 +147,12 @@
               <dl>
                 <dt><code>except($set)</code></dt>
                 <dd>Remove matching OSM types and IDs.</dd>
-                <dt><code>parents_of($set)</code></dt>
-                <dd>Keep ways or relations with a direct member in the set.</dd>
+                <dt data-parent-filter><code>parents_of($set)</code></dt>
+                <dd data-parent-filter>Keep ways or relations with a direct member in the set.</dd>
                 <dt><code>members_of($set)</code></dt>
                 <dd>Keep direct members of the set’s ways or relations.</dd>
               </dl>
-              <p>Both membership filters accept a role, e.g. <code>members_of($routes, "stop")</code>.
+              <p>Membership filters accept a role, e.g. <code>members_of($routes, "stop")</code>.
                 Use <code>""</code> for an empty role. Omit the role to match any link.</p>
             </section>
             <section aria-labelledby="syntax-location">
@@ -307,6 +307,14 @@
         </div>
       </section>
     </main>
+    <dialog id="intro-dialog" aria-labelledby="intro-title" aria-describedby="intro-copy">
+      <div class="dialog-heading"><h2 id="intro-title">Explore an area</h2></div>
+      <div class="dialog-body" id="intro-copy">
+        <p>Move the map to the place you want to explore, then choose <strong>Download this area</strong> at the top of the map. You can review the download size before confirming.</p>
+        <p>Run a query to see matching features. Inside your download, <strong>Update on pan</strong> can refresh the results as you move. Elsewhere, choose <strong>Run query</strong> to search manually.</p>
+      </div>
+      <form method="dialog" class="dialog-actions"><button class="primary" autofocus>Explore the map</button></form>
+    </dialog>
     <dialog id="about-dialog" aria-labelledby="about-title">
       <div class="dialog-heading"><h2 id="about-title">About Regol Live</h2></div>
       <div class="dialog-body">
@@ -332,7 +340,7 @@
           <p>The Regol Live server reads the local GeoDesk GOL file, runs your
             query, and sends the matching features to your browser.</p>
         </section>
-        <p>Keep <strong>Update on pan</strong> enabled to refresh the results
+        <p id="about-pan">Keep <strong>Update on pan</strong> enabled to refresh the results
           as you move the map.</p>
         <div class="about-links">
           <a href="https://regol.org/" target="_blank" rel="noopener">Regol project</a>

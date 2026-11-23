@@ -1,0 +1,5 @@
+/dist/
+/target/
+/node_modules/
+/planet-area-index/
+/planet-areas-*.tar

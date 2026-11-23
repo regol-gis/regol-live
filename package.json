@@ -1,0 +1,21 @@
+{
+  "name": "regol-live",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "bench:london": "node scripts/benchmark-london.mjs",
+    "bench:gob": "node scripts/benchmark-gob.mjs",
+    "start": "node scripts/serve.mjs",
+    "test": "cargo test --locked && node --test tests/*.test.mjs",
+    "test:browser": "cargo build --locked --bin regol-live && node tests/browser.mjs"
+  },
+  "dependencies": {
+    "maplibre-gl": "5.24.0",
+    "sirv": "3.0.2"
+  },
+  "devDependencies": {
+    "playwright-core": "1.56.1"
+  }
+}

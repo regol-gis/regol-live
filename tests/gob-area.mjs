@@ -1,0 +1,119 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { gzipSync } from "node:zlib";
+import { planetURL } from "../web/ranges.js";
+import { planetGobURL } from "../web/gob-area.js";
+
+// geography.gob was exported from the adjacent synthetic geography.gol with
+// GeoDesk's "gol save geography.gol geography.gob -w".
+export async function checkGobArea(browser, base) {
+  const gob = await readFile("tests/fixtures/geography.gob");
+  const gol = await readFile("tests/fixtures/geography.gol");
+  // Simulate a repacked GOL with a different store ID and the same geometries.
+  gol[8] ^= 1;
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  try {
+    const requests = [];
+    for (const [url, file] of [[planetGobURL, gob], [planetURL, gol]]) {
+      await context.route(url, async (route) => {
+        const headers = {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Expose-Headers": "Content-Range, Content-Length, Last-Modified",
+          "Last-Modified": "Sun, 22 Nov 2026 00:00:00 GMT",
+          "Cache-Control": "no-store",
+        };
+        if (route.request().method() === "HEAD")
+          return route.fulfill({ status: 200, headers: { ...headers, "Content-Length": String(file.length) } });
+        const match = /^bytes=(\d+)-(\d+)$/.exec(route.request().headers().range);
+        assert(match, "expected a single range request");
+        const start = Number(match[1]), end = Math.min(Number(match[2]), file.length - 1);
+        assert(start <= end);
+        requests.push({ url, start, end });
+        return route.fulfill({
+          status: 206,
+          headers: {
+            ...headers, "Content-Range": `bytes ${start}-${end}/${file.length}`,
+            "Content-Length": String(end + 1 - start),
+          },
+          body: file.subarray(start, end + 1),
+        });
+      });
+    }
+
+    // Search coordinates from the original store, plus an obsolete name and extent.
+    const snapshot = "v1-c3914aabb90f3a49dd8e08a857c853abbd5ff9b122e16a05-d3eaf9634f18f844-16384";
+    const directory = snapshot + "-0123456789abcdef";
+    const index = base + "/datasets/planet.gol.areas/";
+    await context.route(index + "manifest.json", route =>
+      route.fulfill({ json: { version: 1, shards: 256, snapshot, storage: { format: "gzip", directory } } }));
+    const courtyard = [-2140325369, -23865777];
+    for (const [shard, name, probe] of [
+      ["c8", "Courtyard", courtyard], ["b9", "Old Courtyard", courtyard], ["24", "Two Shells", [0, 2147483647]],
+    ]) {
+      await context.route(index + directory + "/" + shard + ".json.gz", route =>
+        route.fulfill({ body: gzipSync(JSON.stringify([[name, [probe]]])) }));
+    }
+    await page.goto(base + "/build.json");
+    const result = await page.evaluate(async (url) => {
+      const request = { windows: [[-1, -1, 1, 1]], selector: "nwr" };
+      const worker = new Worker("/worker.js", { type: "module" });
+      let id = 0;
+      function requestWorker(type, terminal, next = true, query = request) {
+        return new Promise((resolve, reject) => {
+          const watchdog = setTimeout(() => reject(Error("GOB worker timed out on " + type)), 15000);
+          worker.onerror = (e) => { clearTimeout(watchdog); reject(Error(e.message)); };
+          worker.onmessage = ({ data }) => {
+            if (data.type === terminal) { clearTimeout(watchdog); resolve(data); }
+            else if (data.type === "error" || data.type === "transfer-limit") {
+              clearTimeout(watchdog); reject(Error(data.message || data.type));
+            }
+          };
+          worker.postMessage({ id: next ? ++id : id, url, type, request: query, publicPlanet: true,
+            areaIndex: new URL("/datasets/planet.gol.areas", location.href).href });
+        });
+      }
+      try {
+        const direct = await requestWorker("query", "result");
+        const plan = await requestWorker("plan-area", "area-estimate");
+        const ready = await requestWorker("confirm-area", "area-ready", false);
+        const suggestions = await requestWorker("suggest-tags", "suggestions");
+        const { parseOverpass } = await import("/overpass.js");
+        const namedQuery = async selector => requestWorker("query", "result", true, { windows: request.windows,
+          ...await parseOverpass(selector + "; out count;", request.windows) });
+        const named = await namedQuery('area[name="Courtyard"]');
+        const retagged = await namedQuery('area[name="Courtyard"][tourism=theme_park]');
+        const renamed = await namedQuery('area[name="Old Courtyard"]');
+        const moved = await namedQuery('area[name="Two Shells"]');
+        const imported = await requestWorker("query", "result");
+        const cached = await requestWorker("estimate-area", "area-estimate");
+        return { direct, plan, ready, suggestions, named, retagged, renamed, moved, imported, cached };
+      } finally { worker.terminate(); }
+    }, planetURL);
+    const { direct, plan, ready, suggestions, named, retagged, renamed, moved, imported, cached } = result;
+    assert.notEqual(direct.transport, "gob", "querying before activation uses the direct reader");
+    const length = gob.readUInt32LE(68);
+    assert.equal(plan.transport, "gob");
+    assert.equal(plan.tiles, 1);
+    assert.equal(plan.missing, length);
+    assert.equal(plan.total, length);
+    assert.equal(ready.transport, "gob");
+    assert.equal(ready.bytes, length);
+    assert(suggestions.complete && suggestions.items.length > 0, "tag completion works with a downloaded area");
+    assert.notEqual(named.transport, "gob", "named areas can be outside the GOB view");
+    assert.equal(named.counts.areas, 1, "a store rebuild preserves geographic search hints");
+    for (const lookup of [retagged, renamed, moved]) assert.equal(lookup.counts.total, 0);
+    assert.equal(imported.transport, "gob");
+    assert.equal(imported.snapshot, direct.snapshot);
+    assert.equal(imported.gets, 0);
+    const byID = (a, b) => a.id.localeCompare(b.id);
+    assert(direct.features.length > 2);
+    assert.deepEqual(imported.features.sort(byID), direct.features.sort(byID));
+    assert.equal(imported.skippedGeometries, direct.skippedGeometries);
+    assert.equal(cached.missing, 0);
+    const ranges = requests.filter((r) => r.url === planetGobURL);
+    assert.equal(ranges.reduce((n, r) => n + r.end + 1 - r.start, 0), gob.length);
+  } finally {
+    await context.close();
+  }
+}

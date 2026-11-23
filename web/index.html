@@ -1,0 +1,379 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#ffffff" />
+    <link rel="icon" type="image/png" sizes="512x512" href="./regol.png" />
+    <title>Regol Live · Spatial query explorer</title>
+    <link rel="stylesheet" href="./vendor/maplibre-gl.css" />
+    <link rel="stylesheet" href="./style.css" />
+    <script type="module" src="./logo-globe.js"></script>
+    <script src="./vendor/maplibre-gl.js" defer></script>
+    <script type="module" src="./app.js"></script>
+  </head>
+  <body>
+    <header class="top">
+      <div class="identity">
+        <img
+          src="./regol-live-wordmark.png"
+          width="181"
+          height="42"
+          alt="Regol Live"
+        />
+        <canvas width="168" height="168" aria-hidden="true" hidden></canvas>
+      </div>
+      <div class="subtitle">Spatial query explorer</div>
+      <div class="dataset-controls">
+        <button id="download-area" hidden disabled>
+          Download this area
+          <span id="area-size">Checking size…</span>
+        </button>
+        <label class="dataset">Dataset
+          <select id="dataset">
+            <option value="monaco">Monaco · January 2026</option>
+            <option value="planet" selected>OpenPlanetData · Planet</option>
+            <option value="custom">Custom GOL URL…</option>
+          </select>
+        </label>
+        <button id="open-about" aria-haspopup="dialog" aria-controls="about-dialog">About</button>
+      </div>
+    </header>
+    <main>
+      <aside class="sidebar" aria-label="Query controls and results">
+        <section class="controls">
+          <header class="workspace-header">
+            <div class="workspace-heading">
+              <h1>Query workspace</h1>
+              <div class="language-switch" id="query-language" role="radiogroup" aria-label="Query language">
+                <label>
+                  <input type="radio" name="language" value="goql" aria-controls="selector" autocomplete="off" checked />
+                  <span>GOQL</span>
+                </label>
+                <label>
+                  <input type="radio" name="language" value="overpass" id="overpass-mode" aria-controls="selector" autocomplete="off" />
+                  <span>Overpass QL</span>
+                </label>
+              </div>
+            </div>
+            <p class="query-warning" id="experimental" hidden>Overpass QL support is experimental and not compatible with all Overpass queries</p>
+          </header>
+          <div id="custom-source" hidden>
+            <label for="url">Dataset URL</label
+            ><input id="url" type="url" placeholder="https://…/region.gol" />
+          </div>
+          <div class="editor-tools">
+            <select id="example" aria-label="Example queries">
+              <option value="">Example queries…</option>
+            </select>
+            <button id="open-builder">Query builder</button>
+          </div>
+          <label for="selector">Query</label>
+          <div class="tag-anchor">
+            <textarea
+              id="selector"
+              aria-describedby="query-warning"
+              spellcheck="false"
+              autocapitalize="off"
+              rows="9"
+              maxlength="65536"
+            ></textarea>
+          </div>
+          <div class="actions">
+            <button id="run" class="primary">
+              <span class="play" aria-hidden="true"></span>Run query
+            </button>
+            <label class="toggle">
+              <input id="auto" type="checkbox" checked /> Update on pan
+            </label>
+            <button id="cancel" aria-label="Cancel query" hidden>Cancel</button>
+          </div>
+          <p class="query-warning" id="query-warning" role="status"></p>
+          <button type="button" id="locate-issue" hidden>Select problem in query</button>
+          <button type="button" id="repair-issue" hidden></button>
+          <div id="editor-suggestions"></div>
+          <div id="native-progress" hidden>
+            <progress aria-label="Native query in progress" aria-describedby="native-phase"></progress>
+            <span id="native-phase"></span>
+          </div>
+          <details class="syntax" id="regol-syntax">
+            <summary>Query syntax</summary>
+            <section aria-labelledby="syntax-sets">
+              <h2 id="syntax-sets">Write a query</h2>
+              <p>Run a selector such as <code>na[amenity=cafe]</code> on its own.
+                Each selector searches the current viewport, including reference sets.</p>
+              <dl>
+                <dt><code>$cafes = na[amenity=cafe]</code></dt>
+                <dd>Name a set of cafés in view.</dd>
+                <dt><code>$inside = $cafes | within($geometry)</code></dt>
+                <dd>Filter an earlier set. Chain filters with <code>|</code>.</dd>
+                <dt><code>show($inside, $geometry)</code></dt>
+                <dd>Finish a program with named sets by choosing which ones to display.</dd>
+              </dl>
+              <p>
+                Define each name once, before use. Separate statements with newlines or
+                <code>;</code>. A pipe can start or end a line. Start comments with <code>//</code>.
+              </p>
+            </section>
+            <section aria-labelledby="syntax-tags">
+              <h2 id="syntax-tags">Select features by tag</h2>
+              <p>Refine an earlier set with the same GOQL brackets, for example
+                <code>$named = $cafes | where [name]</code>.</p>
+              <p>
+                <code>n</code> nodes · <code>a</code> areas · <code>w</code> non-area ways ·
+                <code>r</code> non-area relations · <code>*</code> all. Combine letters to include several types.
+              </p>
+              <dl>
+                <dt><code>na[amenity=cafe][name]</code></dt>
+                <dd>Both tags must match.</dd>
+                <dt><code>n[shop],a[leisure=park]</code></dt>
+                <dd>Either selector can match.</dd>
+                <dt><code>[name]</code> · <code>[!name]</code></dt>
+                <dd>Present except <code>no</code> · missing or <code>no</code>.</dd>
+                <dt><code>[amenity=cafe,bar]</code> · <code>[access!=private,no]</code></dt>
+                <dd>Any listed value · none (includes missing tags).</dd>
+                <dt><code>[height&gt;12]</code></dt>
+                <dd>Numeric tests use <code>= != &lt; &lt;= &gt; &gt;=</code>.</dd>
+                <dt><code>[ref="007"]</code> · <code>[name='Hyde Park']</code></dt>
+                <dd>Quote spaces or numeric-looking text. Escape quotes with a backslash.</dd>
+                <dt><code>[name=Park*]</code> · <code>[name=*Park]</code> · <code>[name=*Park*]</code></dt>
+                <dd>Starts with · ends with · contains.</dd>
+                <dt><code>[name~"(?i).*park.*"]</code> · <code>[name!~"Old .*"]</code></dt>
+                <dd>Whole-value regex. <code>!~</code> excludes matches. <code>(?i)</code> ignores case.</dd>
+              </dl>
+            </section>
+            <section aria-labelledby="syntax-membership">
+              <h2 id="syntax-membership">Filter by set or membership</h2>
+              <dl>
+                <dt><code>except($set)</code></dt>
+                <dd>Remove matching OSM types and IDs.</dd>
+                <dt><code>parents_of($set)</code></dt>
+                <dd>Keep ways or relations with a direct member in the set.</dd>
+                <dt><code>members_of($set)</code></dt>
+                <dd>Keep direct members of the set’s ways or relations.</dd>
+              </dl>
+              <p>Both membership filters accept a role, e.g. <code>members_of($routes, "stop")</code>.
+                Use <code>""</code> for an empty role. Omit the role to match any link.</p>
+            </section>
+            <section aria-labelledby="syntax-location">
+              <h2 id="syntax-location">Filter by location</h2>
+              <p>Use an earlier set or <code>$geometry</code> as <code>$ref</code>.</p>
+              <dl>
+                <dt><code>intersects($ref)</code></dt>
+                <dd>Shares any point.</dd>
+                <dt><code>within($ref)</code></dt>
+                <dd>Wholly inside. Interiors must meet.</dd>
+                <dt><code>covered_by($ref)</code></dt>
+                <dd>Wholly inside or on the boundary.</dd>
+                <dt><code>contains($ref)</code></dt>
+                <dd>The reference is within the candidate.</dd>
+                <dt><code>touches($ref)</code></dt>
+                <dd>Meets only at a boundary.</dd>
+                <dt><code>overlaps($ref)</code></dt>
+                <dd>Partly shares area, length or points with a shape of the same dimension.</dd>
+                <dt><code>crosses($ref)</code></dt>
+                <dd>Passes through, like a path entering a park.</dd>
+                <dt><code>within_distance($ref, 150)</code></dt>
+                <dd>At most 150 metres away.</dd>
+                <dt><code>disjoint($ref)</code></dt>
+                <dd>Shares no point with any reference.</dd>
+              </dl>
+            </section>
+          </details>
+          <details class="syntax" id="overpass-syntax" hidden>
+            <summary>Overpass QL syntax</summary>
+            <dl>
+              <dt><code>nwr["amenity"="cafe"]({{bbox}});</code></dt>
+              <dd>Choose <code>node</code>, <code>way</code>, <code>rel</code> (<code>relation</code>), <code>nw</code>, <code>nr</code>, <code>wr</code> or <code>nwr</code>.</dd>
+              <dt><code>[key] · [!key] · [key=value] · [key!=value]</code></dt>
+              <dd>Chain tag filters. Quote keys and values containing punctuation.</dd>
+              <dt><code>[name~"station",i]</code> · <code>[name!~"^Old"]</code></dt>
+              <dd>Match or exclude a value pattern. Add <code>,i</code> to ignore case.</dd>
+              <dt><code>(if:is_number(t["height"]) &amp;&amp; number(t["height"]) &gt;= 30)</code></dt>
+              <dd>Test each feature’s tags. Combine comparisons with <code>&amp;&amp;</code>, <code>||</code>, <code>!</code> and parentheses.</dd>
+              <dt><code>(south,west,north,east)</code></dt>
+              <dd>Use a fixed box, or set a default with <code>[bbox:s,w,n,e];</code>.</dd>
+              <dt><code>(poly:"lat lon lat lon lat lon")</code></dt>
+              <dd>Filter by a polygon. List at least three vertices.</dd>
+              <dt><code>area[name="England"]-&gt;.country;</code></dt>
+              <dd>Look up all areas with this exact name. Add tag filters to narrow it.</dd>
+              <dt><code>map_to_area-&gt;.parks;</code> · <code>node(area.parks);</code></dt>
+              <dd>Use selected closed ways or polygon relations as search areas.</dd>
+              <dt><code>(around.stops:150)</code> · <code>(around:150,lat,lon)</code></dt>
+              <dd>Search within metres of a set or point. Append more latitude/longitude pairs to follow a line.</dd>
+              <dt><code>-&gt;.a;</code> · <code>(.a; .b;);</code> · <code>(.a; - .b;);</code> · <code>nwr.a.b;</code></dt>
+              <dd>Save, combine, subtract or intersect elements. Union and difference also work on area sets.</dd>
+              <dt><code>node(w.roads);</code> · <code>way(bn.crossings);</code></dt>
+              <dd>Get a way’s nodes or find the ways containing selected nodes.</dd>
+              <dt><code>way(r.routes);</code> · <code>node(r.routes:"stop");</code></dt>
+              <dd>Select direct relation members, optionally by role.</dd>
+              <dt><code>rel(bn.stops);</code> · <code>rel(bw.roads);</code> · <code>rel(br.routes);</code></dt>
+              <dd>Find parent relations of nodes, ways or relations.</dd>
+              <dt><code>foreach.stops-&gt;.s { … }</code> · <code>if (near.count(nodes) == 5) { … }</code></dt>
+              <dd>Loop over nodes. Filter a named set with <code>node.stops(around.s:100)</code>. Collect matches with <code>(.hits; .near;)-&gt;.hits;</code>.</dd>
+              <dt><code>&gt;;</code> · <code>.routes &gt; -&gt;.members;</code></dt>
+              <dd>Expand ways into nodes and relations into their direct nodes, ways and those ways’ nodes.</dd>
+              <dt><code>out geom;</code> · <code>out center;</code> · <code>out count;</code></dt>
+              <dd>Emit shapes, centres or totals. Repeat outputs or select a named set with <code>.stops out count;</code>. <code>body</code> keeps tags, <code>skel</code> omits them. <code>asc</code> sorts by ID within type, <code>qt</code> by location within type.</dd>
+            </dl>
+            <p>Settings include <code>[out:json]</code>, <code>[bbox:s,w,n,e]</code> and <code>[timeout:seconds]</code>. Start from a bounded selection.</p>
+          </details>
+          <section id="regol-geometry" class="reference" aria-labelledby="geometry-heading">
+            <h2 id="geometry-heading">Map geometry <code>$geometry</code></h2>
+            <p id="reference-status">
+              Draw, paste or pick a feature to use as a spatial reference.
+            </p>
+            <div class="tools" id="reference-tools">
+              <button data-draw="Point">Point</button
+              ><button data-draw="LineString">Line</button
+              ><button data-draw="Polygon">Polygon</button>
+              <button id="paste">GeoJSON…</button
+              ><button id="clear-reference" hidden>Clear</button>
+            </div>
+            <div id="drawing" hidden>
+              <p id="draw-help"></p>
+              <button id="finish">Finish drawing</button>
+              <button id="discard">Cancel drawing</button>
+            </div>
+            <div id="pasting" hidden>
+              <label for="geometry">GeoJSON geometry or feature</label
+              ><textarea id="geometry" rows="3" spellcheck="false"></textarea
+              ><button id="use-json">Use geometry</button>
+            </div>
+          </section>
+        </section>
+        <section class="results" aria-label="Query results">
+          <div class="section-head">
+            <h2>Results</h2>
+            <span id="count" class="count">0</span>
+            <div class="export-tools">
+              <select id="export-format" aria-label="Export format">
+                <option value="geojson">GeoJSON</option>
+                <option value="kml">KML</option>
+                <option value="csv">CSV (WKT)</option>
+                <option value="svg">SVG map</option>
+                <option value="html">HTML map</option>
+              </select>
+              <button id="export-results" disabled>Export</button>
+            </div>
+          </div>
+          <p id="count-types" role="status" hidden></p>
+          <p id="status" role="status" aria-live="polite">Opening map…</p>
+          <div id="set-legend" hidden aria-label="Shown sets"></div>
+          <p id="geometry-warning" role="status" hidden></p>
+          <button id="continue-query" hidden>Continue query</button>
+          <p class="query-warning" id="reference-note" role="status"></p>
+          <details id="query-steps" hidden>
+            <summary>Query steps</summary>
+            <p>Candidates are counted before pipeline filters and deduplication. Matches are features kept for display or reuse. Retained features were stored for a later step.</p>
+            <table><thead><tr><th>Step</th><th>Candidates</th><th>Matches</th><th>Retained for reuse</th></tr></thead>
+              <tbody id="step-counts"></tbody></table>
+          </details>
+          <details id="timings" hidden>
+            <summary>Range timings</summary>
+            <p id="timing-values"></p>
+          </details>
+          <ul id="list"></ul>
+          <button id="more" hidden>Show more results</button>
+        </section>
+      </aside>
+      <section class="map-panel" aria-label="Map and feature details">
+        <div id="map" aria-label="Interactive query map"></div>
+        <div id="inspector" class="inspector" hidden>
+          <button id="close-detail" aria-label="Close feature details">
+            ×
+          </button>
+          <div
+            id="hit-carousel"
+            role="group"
+            aria-label="Overlapping features"
+            hidden
+          >
+            <button id="prev-hit" aria-label="Previous feature">←</button>
+            <span
+              id="hit-position"
+              aria-live="polite"
+              aria-atomic="true"
+            ></span>
+            <button id="next-hit" aria-label="Next feature">→</button>
+          </div>
+          <span id="detail-id" class="mono"></span>
+          <h2 id="detail-name" aria-live="polite"></h2>
+          <dl id="tags"></dl>
+          <button id="use-feature">Use as reference geometry</button>
+        </div>
+        <div class="map-status">
+          <span id="coords"></span><span id="zoom"></span>
+        </div>
+      </section>
+    </main>
+    <dialog id="about-dialog" aria-labelledby="about-title">
+      <div class="dialog-heading"><h2 id="about-title">About Regol Live</h2></div>
+      <div class="dialog-body">
+        <p>Regol Live searches OpenStreetMap features in the current map view.
+          Choose an example query or write your own, then select a match on the
+          map or in the results to inspect its tags.</p>
+        <section id="about-standalone">
+          <h3>Standalone mode</h3>
+          <p>Select <strong>Run query</strong> to start. The Regol engine runs in
+            your browser using WebAssembly and reads the parts of the GeoDesk
+            GOL file it needs. Use <strong>Download this area</strong> to cache
+            tiles for the visible area ahead of time. For the public planet, the
+            browser downloads compressed Geo-Object Bundle (GOB) tiles and
+            builds their query indexes locally. Features extending outside the
+            view can fetch additional tiles.</p>
+          <p id="about-planet-areas" hidden></p>
+          <p>Planet data and the area index are © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>
+            under the <a href="https://opendatacommons.org/licenses/odbl/1-0/">Open Database License</a>.
+            The planet GOL and GOB are provided by <a href="https://openplanetdata.com/datasets/openstreetmap/planet/">OpenPlanetData</a>.</p>
+        </section>
+        <section id="about-native" hidden>
+          <h3>Native mode</h3>
+          <p>The Regol Live server reads the local GeoDesk GOL file, runs your
+            query, and sends the matching features to your browser.</p>
+        </section>
+        <p>Keep <strong>Update on pan</strong> enabled to refresh the results
+          as you move the map.</p>
+        <div class="about-links">
+          <a href="https://regol.org/" target="_blank" rel="noopener">Regol project</a>
+          <a href="https://github.com/regol-gis/regol-live" target="_blank" rel="noopener">Regol Live source</a>
+          <a href="https://github.com/regol-gis/regol" target="_blank" rel="noopener">Regol engine source</a>
+          <a href="./build.json" target="_blank" rel="noopener">Build details</a>
+        </div>
+        <p id="about-version" role="status">Loading version…</p>
+      </div>
+      <form method="dialog" class="dialog-actions"><button autofocus>Close</button></form>
+    </dialog>
+    <dialog id="area-dialog" aria-labelledby="area-title">
+      <div class="dialog-heading"><h2 id="area-title">Download this area</h2></div>
+      <div class="dialog-body"><p id="area-status" role="status"></p></div>
+      <div class="dialog-actions">
+        <button id="cancel-area">Cancel</button>
+        <button id="confirm-area" class="primary" hidden>Download</button>
+      </div>
+    </dialog>
+    <dialog id="builder" aria-labelledby="builder-title">
+      <div class="dialog-heading">
+        <h2 id="builder-title">Query builder</h2>
+        <button id="dismiss-builder" aria-label="Close query builder">×</button>
+      </div>
+      <div class="dialog-body">
+        <p class="builder-hint">
+          Start with a GOQL selector or an earlier set. Add filters to narrow it.
+        </p>
+        <div id="builder-sets"></div>
+        <button id="add-set">Add set</button>
+        <label class="toggle"
+          ><input type="checkbox" id="show-geometry" /> Show attached map
+          geometry</label
+        >
+        <p class="query-warning" id="builder-warning" role="status"></p>
+        <p id="builder-error" role="alert" hidden></p>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancel-builder">Cancel</button
+        ><button id="apply-builder" class="primary">Apply and run</button>
+      </div>
+    </dialog>
+  </body>
+</html>

@@ -18,11 +18,11 @@ The global name index covers named administrative boundaries and settlement poly
 
 ## Serve a local GOL
 
-Install the main CLI and the Live server separately with Rust 1.90 or later. These source installs include the CLI’s Live command and the shared GOQL and Overpass engine.
+Install the main CLI and the Live server separately with Rust 1.90 or later. The main CLI supports the Live command from version 0.4.0.
 
 ```sh
-cargo install --locked --git https://github.com/regol-gis/regol.git --rev eb2de961d861f7343b58c94cf62f2250823b8a52 regol-cli
-cargo install --locked --git https://github.com/regol-gis/regol-live.git regol-live
+cargo install --locked regol-cli
+cargo install --locked regol-live
 regol live region.gol
 ```
 

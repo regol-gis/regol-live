@@ -17,16 +17,16 @@ include = ["/build.rs", "/src/**", "/web/**", "/docs/**", "/tests/*.rs", "/tests
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-regol = { version = "0.3.0", default-features = false }
-regol-overpass = "0.3.0"
+regol = { version = "0.4.0", default-features = false }
+regol-overpass = "0.4.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-regol = { version = "0.3.0", default-features = false, features = ["gob"] }
+regol = { version = "0.4.0", default-features = false, features = ["gob"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-regol = { version = "0.3.0", default-features = false, features = ["mmap"] }
+regol = { version = "0.4.0", default-features = false, features = ["mmap"] }
 rayon = "1.12"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
 tokio = { version = "1", features = ["rt", "net", "sync"] }
@@ -36,11 +36,5 @@ inherits = "release"
 lto = true
 opt-level = "s"
 strip = true
-
-[patch.crates-io]
-# Both crates must share feature handle types. This revision adds in-stream
-# GOQL predicates and per-set counters to the shared executor.
-regol = { git = "https://github.com/regol-gis/regol.git", rev = "e852f52ddf31c24cf6abca7c5c6755e746052780" }
-regol-overpass = { git = "https://github.com/regol-gis/regol.git", rev = "e852f52ddf31c24cf6abca7c5c6755e746052780" }
 
 [workspace]

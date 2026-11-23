@@ -59,7 +59,7 @@ function webManifest(bytes, openPlanetSnapshot) {
 export function areaIndexFiles(memory, golURL, indexURL) {
   let pending, storage;
   return {
-    async fetch_area_file(pathPtr, pathSize, limit, snapshotPtr, snapshotSize) {
+    async fetch_area_file(pathPtr, pathSize, limit, snapshotPtr, snapshotSize, signal) {
       pending = undefined;
       const path = utf8.decode(new Uint8Array(memory().buffer, pathPtr >>> 0, pathSize));
       const isManifest = path === "manifest.json";
@@ -78,7 +78,7 @@ export function areaIndexFiles(memory, golURL, indexURL) {
       url.pathname = url.pathname.replace(/\/$/, "") + (index ? "/" : ".areas/") + filename;
       url.hash = "";
       try {
-        const response = await fetch(url, { cache: isManifest ? "no-cache" : "force-cache" });
+        const response = await fetch(url, { cache: isManifest ? "no-cache" : "force-cache", signal });
         if (!response.ok) return -1;
         let data = await readLimited(response.body, limit);
         if (!data) return -2;

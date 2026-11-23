@@ -12,6 +12,11 @@ export async function checkHostedPages(browser, base) {
       postMessage(message, ...args) {
         if (message.request?.sets) window.queries.push(message.downloadedOnly === true);
         super.postMessage(message, ...args);
+        if (message.request?.sets && window.switchDuringQuery) {
+          const radio = window.switchDuringQuery;
+          window.switchDuringQuery = null;
+          queueMicrotask(() => radio.click());
+        }
       }
     };
   });
@@ -66,6 +71,26 @@ export async function checkHostedPages(browser, base) {
     await page.waitForFunction(() => queries.includes(true));
     await finished();
     await sizeReady();
+    // Switch after compilation dispatches the query and before the worker can
+    // return its result. Each language must then search the same pinned pages.
+    const transfers = [];
+    context.on("request", req => { if (req.url().endsWith(".gol")) transfers.push(req.url()); });
+    for (const [language, selector] of [
+      ["Overpass QL", "node[amenity=cafe]({{bbox}}); out count;"],
+      ["GOQL", "n[amenity=cafe]"],
+    ]) {
+      const radio = page.getByRole("radio", { name: language, exact: true });
+      await radio.evaluate(el => { window.switchDuringQuery = el; });
+      await page.click("#run");
+      await page.waitForFunction(() => !window.switchDuringQuery && document.getElementById("status").textContent === "Ready to run.");
+      assert(await radio.isChecked());
+      assert(await auto.isChecked());
+      await page.fill("#selector", selector);
+      await page.click("#run");
+      await finished();
+      assert.match(await page.textContent("#status"), /Cached · 0 ranges/);
+    }
+    assert.deepEqual(transfers, []);
     const before = await page.evaluate(() => queries.length);
     await pan([7.49, 43.77], 16);
     await sizeReady();

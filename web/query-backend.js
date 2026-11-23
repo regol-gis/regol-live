@@ -80,11 +80,11 @@ export class RangeQueries {
     this.worker?.postMessage({ type: "continue" });
   }
 
-  cancel(reuseSource) {
-    if (this.area) {
+  cancel({ reuseSource, keepDownload = false } = {}) {
+    if (this.area || keepDownload) {
       this.suggestion?.cancel();
       this.foreground = null;
-      this.worker?.postMessage({ type: "cancel-area", id: this.id, reuseSource });
+      this.worker?.postMessage({ type: this.area ? "cancel-area" : "cancel-query", id: this.id, reuseSource });
       this.id++;
       this.area = false;
       return;

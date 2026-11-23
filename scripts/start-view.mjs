@@ -16,6 +16,7 @@ export function localStartView(path) {
       const instance = new WebAssembly.Instance(module, {
         range: {
           suggestion_stopped: () => 0,
+          query_stopped: () => 0,
           fetch_area_file: () => -1,
           copy_area_file: () => 0,
           get_page(offset, destination, size) {

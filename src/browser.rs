@@ -1,7 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 mod gob;
 
-use crate::{MAX_REQUEST_BYTES, Request, execute, query_limits};
+use crate::{MAX_REQUEST_BYTES, Request, execute_cancellable, query_limits};
 use regol::{DictionaryLoading, Library, source::Source};
 use serde_json::json;
 use std::{cell::RefCell, collections::HashMap, io};
@@ -13,6 +13,7 @@ use std::{cell::RefCell, collections::HashMap, io};
 unsafe extern "C" {
     fn get_page(offset: u64, destination: *mut u8, size: usize, sparse: bool) -> i32;
     fn suggestion_stopped() -> bool;
+    fn query_stopped() -> bool;
     fn fetch_area_file(
         path: *const u8,
         path_size: usize,
@@ -24,6 +25,20 @@ unsafe extern "C" {
 }
 #[cfg(all(test, not(target_arch = "wasm32")))]
 use tests::get_page;
+
+fn cancellation_check() -> impl Fn() -> Result<(), String> {
+    // The executor checks individual candidates. Sample at intervals to keep
+    // large cached scans in Wasm between visits to the worker event loop.
+    #[cfg(target_arch = "wasm32")]
+    let calls = std::cell::Cell::new(0u8);
+    move || {
+        #[cfg(target_arch = "wasm32")]
+        if calls.replace(calls.get().wrapping_add(1)) == 0 && unsafe { query_stopped() } {
+            return Err("Query cancelled.".into());
+        }
+        Ok(())
+    }
+}
 
 const PAGE: u64 = 128 * 1024;
 const FRAGMENT: u64 = 16 * 1024;
@@ -361,12 +376,12 @@ pub extern "C" fn query() -> usize {
                         program,
                         lib.source(),
                         |path, limit| read_area_file(path, limit, lib.source()),
-                        &|| Ok(()),
+                        &cancellation_check(),
                     )?;
                 }
                 req
             };
-            execute(lib, req)
+            execute_cancellable(lib, req, &cancellation_check())
         })
     });
     match result {

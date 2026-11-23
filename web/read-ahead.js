@@ -228,7 +228,7 @@ export class ViewportReadAhead {
     let hints;
     try {
       const response = await fetch(endpoint, {
-        signal: AbortSignal.timeout(2000),
+        signal: source.signal ? AbortSignal.any([source.signal, AbortSignal.timeout(2000)]) : AbortSignal.timeout(2000),
         cache: "no-store",
       });
       if (response.status !== 200) return;

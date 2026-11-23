@@ -68,12 +68,26 @@ async function newEngine(range) {
     throw error;
   });
   const instance = await WebAssembly.instantiate(await wasmModule, {
-    range: { fetch_area_file: () => -1, copy_area_file: () => 0, ...range },
+    range: {
+      fetch_area_file: () => -1, copy_area_file: () => 0,
+      query_stopped: new WebAssembly.Suspending(checkQuery), ...range,
+    },
   });
   return instance.exports;
 }
 
-const newGobEngine = () => newEngine({ get_page: () => 0, suggestion_stopped: () => 0 });
+async function newGobEngine() {
+  const api = await newEngine({ get_page: () => 0, suggestion_stopped: () => 0 });
+  return { ...api, gob_query: WebAssembly.promising(api.gob_query) };
+}
+
+function checkQuery() {
+  const now = performance.now();
+  if (now < job.nextYield) return Number(job.signal.aborted);
+  // Let the worker receive cancellation even when the whole scan is in memory.
+  job.nextYield = now + 16;
+  return new Promise(resolve => setTimeout(() => resolve(Number(job.signal.aborted)), 0));
+}
 
 async function open(url, localFile) {
   api = null;
@@ -88,13 +102,13 @@ async function open(url, localFile) {
     },
     measureStorage,
   );
-  source.signal = job.area?.controller.signal ?? job.suggestion?.controller.signal;
+  source.signal = job.signal;
   const remaining = () => job.limit - stats.bytes;
   const getPage = new WebAssembly.Suspending(
     async (offset, destination, length, sparse) => {
       const began = performance.now();
       try {
-        if (suggestionStopped()) return 0;
+        if (job.signal.aborted || suggestionStopped()) return 0;
         const start = Number(offset);
         if (job.downloadedOnly) {
           const cached = ahead.get(start, length);
@@ -140,6 +154,7 @@ async function open(url, localFile) {
           job.prefetchGets += stats.gets - previousGets;
         }
         if (!page) {
+          job.signal.throwIfAborted();
           if (job.locate && (stats.bytes + length > job.limit || performance.now() > job.locateUntil)) {
             return 0;
           }
@@ -161,6 +176,7 @@ async function open(url, localFile) {
                 allowance: job.allowance,
               });
             });
+            job.signal.throwIfAborted();
             job.pausedBefore = performance.now() - paused;
             job.pausedMs += job.pausedBefore;
             job.limit += job.allowance;
@@ -187,7 +203,7 @@ async function open(url, localFile) {
       fetch_area_file: new WebAssembly.Suspending(async (...args) => {
         const start = performance.now();
         try {
-          return await areaFiles.fetch_area_file(...args);
+          return await areaFiles.fetch_area_file(...args, job.signal);
         } finally {
           job.pageMs += performance.now() - start;
         }
@@ -302,18 +318,21 @@ async function gobQuery(start, request) {
   try {
     const entries = gobActive.plan(job.windows);
     if (entries.length && entries.every(({ loaded }) => loaded)) {
-      const { value, resultBytes, engineMs } = await gobActive.query(request, () => job.downloadedOnly ? 0 : job.limit - stats.bytes);
+      const remaining = () => job.downloadedOnly ? 0 : job.limit - stats.bytes;
+      const { value, resultBytes, engineMs } = await gobActive.query(request, remaining, job.signal);
       job.engineMs = engineMs;
       sendResult(value, resultBytes, gobActive.snapshot, start, "gob");
       return true;
     }
   } catch (error) {
     if (error instanceof GobQueryError) throw error;
-    refreshGolForFallback(gobActive);
     if (gobActive.invalidated || error instanceof WebAssembly.RuntimeError) {
+      refreshGolForFallback(gobActive);
       if (gobCatalog === gobActive) gobCatalog = null;
       gobActive = null;
     }
+    job.signal.throwIfAborted();
+    if (gobActive) refreshGolForFallback(gobActive);
     return false;
   }
   refreshGolForFallback(gobActive);
@@ -334,12 +353,14 @@ async function checkSuggestion() {
   return Number(suggestionStopped());
 }
 
-async function run(data, area, suggestion) {
+async function run(data, area, suggestion, signal) {
   const start = performance.now();
   stats = { gets: 0, bytes: 0, cacheBytes: 0 };
   const allowance = transferAllowance(data.localFile === true);
   job = {
     id: data.id,
+    signal,
+    nextYield: start + 16,
     area,
     areaIndex: data.areaIndex,
     downloadedOnly: data.downloadedOnly === true,
@@ -373,10 +394,9 @@ async function run(data, area, suggestion) {
         "This browser needs WebAssembly JS Promise Integration. Use a current Chrome, Firefox or Safari release.",
       );
     }
-    area?.controller.signal.throwIfAborted();
+    signal.throwIfAborted();
     if (hostedPages) checkParentLookups(data.request.sets);
     if (suggestion) {
-      suggestion.controller.signal.throwIfAborted();
       suggestion.until = start + 1200;
       suggestion.nextYield = start + 12;
       timer = setTimeout(() => suggestion.controller.abort(), 1200);
@@ -411,12 +431,10 @@ async function run(data, area, suggestion) {
         if (area) area.opening = false;
       }
     }
-    if (suggestion) source.signal = suggestion.controller.signal;
+    source.signal = signal;
     if (area) {
       if (area.stopAfterOpen) return;
-      const { signal } = area.controller;
       signal.throwIfAborted();
-      source.signal = signal;
       areaDownload ??= new AreaDownload(source, ahead, (start, length) => {
         const ptr = api.cached_block(BigInt(start)) >>> 0;
         return ptr ? new Uint8Array(api.memory.buffer, ptr, length) : null;
@@ -434,6 +452,7 @@ async function run(data, area, suggestion) {
     if (data.locate) {
       job.locateUntil = performance.now() + 3000;
       const view = result(await WebAssembly.promising(api.start_view)());
+      signal.throwIfAborted();
       if (transferError) throw Error(transferError);
       send({ type: "view", view });
       return;
@@ -455,9 +474,12 @@ async function run(data, area, suggestion) {
     } finally {
       job.engineMs = Math.max(0, performance.now() - queryStart - job.pageMs);
     }
+    signal.throwIfAborted();
     if (job.missingPage) return send({ type: "outside-download" });
     sendResult(result(resultBytes), resultBytes, snapshot, start);
   } catch (error) {
+    // An interrupted read does not invalidate the open dataset or its pinned tiles.
+    if (!area && !suggestion && signal.aborted && !source?.invalidated && !(error instanceof WebAssembly.RuntimeError)) return;
     if (job.missingPage) return send({ type: "outside-download" });
     // On an interrupted transfer or failed open the next job gets a fresh source.
     if (usingGol && (transferError || source?.invalidated || error instanceof WebAssembly.RuntimeError))
@@ -478,7 +500,13 @@ async function run(data, area, suggestion) {
 }
 
 let pendingArea, pendingSuggestion, queue = Promise.resolve();
+const queries = new Map();
 onmessage = ({ data }) => {
+  if (data.type === "cancel-query") {
+    queries.get(data.id)?.abort();
+    if (job?.id === data.id) job.resume?.();
+    return;
+  }
   if (data.type === "cancel-suggestion") {
     if (pendingSuggestion?.id === data.id) pendingSuggestion.controller.abort();
     return;
@@ -503,13 +531,15 @@ onmessage = ({ data }) => {
   // A cancelled download drains its in-flight reads before the next query
   // enters Wasm. Keep the open snapshot and its previously downloaded area.
   const isArea = data.type === "plan-area" || data.type === "estimate-area";
+  const controller = new AbortController();
   const area = isArea ? {
     id: data.id, url: data.url, estimateOnly: data.type === "estimate-area",
-    controller: new AbortController(),
+    controller,
   } : null;
   if (area) pendingArea = area;
-  const suggestion = data.type === "suggest-tags" ? { id: data.id, controller: new AbortController() } : null;
+  const suggestion = data.type === "suggest-tags" ? { id: data.id, controller } : null;
   if (suggestion) pendingSuggestion = suggestion;
-  queue = queue.then(() => run(data, area, suggestion));
+  if (!area && !suggestion) queries.set(data.id, controller);
+  queue = queue.then(() => run(data, area, suggestion, controller.signal)).finally(() => queries.delete(data.id));
   return queue;
 };

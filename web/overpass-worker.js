@@ -8,7 +8,7 @@ self.onmessage = async ({ data: { id, input } }) => {
   try {
     instance ??= WebAssembly.instantiateStreaming(fetch("./regol-live.wasm"), {
       range: {
-        get_page: () => 0, suggestion_stopped: () => 0,
+        get_page: () => 0, suggestion_stopped: () => 0, query_stopped: () => 0,
         fetch_area_file: () => -1, copy_area_file: () => 0,
       },
     }).then(result => result.instance.exports).catch(error => {

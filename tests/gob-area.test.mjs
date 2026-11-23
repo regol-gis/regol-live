@@ -176,6 +176,7 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   let unavailable = true;
   let downloadFails = true;
   let queryMode = "application-error";
+  let pendingQuery;
   let archiveSnapshot = "archive";
   let opened = 0;
   t.mock.method(GobArea, "open", async () => {
@@ -192,7 +193,11 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
         this.active = true;
         return this;
       },
-      async query() {
+      async query(_request, _remaining, signal) {
+        if (pendingQuery) {
+          pendingQuery();
+          return new Promise((_, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+        }
         if (queryMode === "application-error") throw new GobQueryError("Invalid selector");
         if (queryMode === "changed") {
           this.invalidated = true;
@@ -260,6 +265,20 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   await send(6, "query");
   assert.equal(messages.at(-1).message, "Invalid selector");
   assert.equal(golOpens, 2, "application errors do not reopen GOL");
+
+  const entered = new Promise(resolve => { pendingQuery = resolve; });
+  const running = send(60, "query");
+  await entered;
+  const queued = send(61, "query");
+  send(61, "cancel-query");
+  send(60, "cancel-query");
+  await Promise.all([running, queued]);
+  pendingQuery = null;
+  assert(!messages.some(message => [60, 61].includes(message.id)));
+  assert.equal(golOpens, 2, "cancellation never falls back to the GOL");
+  await send(62, "estimate-area");
+  assert.equal(messages.at(-1).covered, true);
+  assert.equal(messages.at(-1).missing, 0);
 
   downloadFails = true;
   const replacement = await plan(7, { windows: east });

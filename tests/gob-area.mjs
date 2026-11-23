@@ -47,6 +47,10 @@ export async function checkGobArea(browser, base) {
     const index = base + "/datasets/planet.gol.areas/";
     await context.route(index + "manifest.json", route =>
       route.fulfill({ json: { version: 1, shards: 256, snapshot, storage: { format: "gzip", directory } } }));
+    let manifestRequested;
+    const stalled = new Promise(resolve => { manifestRequested = resolve; });
+    await context.route("**/stalled-index/manifest.json", () => { manifestRequested(); });
+    await page.exposeFunction("waitForStalledIndex", () => stalled);
     const courtyard = [-2140325369, -23865777];
     for (const [shard, name, probe] of [
       ["c8", "Courtyard", courtyard], ["b9", "Old Courtyard", courtyard], ["24", "Two Shells", [0, 2147483647]],
@@ -64,6 +68,7 @@ export async function checkGobArea(browser, base) {
           const watchdog = setTimeout(() => reject(Error("GOB worker timed out on " + type)), 15000);
           worker.onerror = (e) => { clearTimeout(watchdog); reject(Error(e.message)); };
           worker.onmessage = ({ data }) => {
+            if (data.id !== id) return;
             if (data.type === terminal) { clearTimeout(watchdog); resolve(data); }
             else if (data.type === "error" || data.type === "transfer-limit") {
               clearTimeout(watchdog); reject(Error(data.message || data.type));
@@ -83,6 +88,12 @@ export async function checkGobArea(browser, base) {
           { ...request, readWindows: [[-10,-10,10,10]] }, true);
         const suggestions = await requestWorker("suggest-tags", "suggestions");
         const { parseOverpass } = await import("/overpass.js");
+        const namedPlan = await parseOverpass('area[name="Courtyard"]; out count;', request.windows);
+        worker.postMessage({ id: ++id, url, publicPlanet: true, type: "query",
+          request: { ...namedPlan, windows: request.windows }, areaIndex: new URL("/stalled-index", location.href).href });
+        await window.waitForStalledIndex();
+        worker.postMessage({ id, type: "cancel-query" });
+        const afterCancel = await requestWorker("query", "result", true, request, true);
         const namedQuery = async selector => requestWorker("query", "result", true, { windows: request.windows,
           ...await parseOverpass(selector + "; out count;", request.windows) });
         const named = await namedQuery('area[name="Courtyard"]');
@@ -91,13 +102,16 @@ export async function checkGobArea(browser, base) {
         const moved = await namedQuery('area[name="Two Shells"]');
         const imported = await requestWorker("query", "result");
         const cached = await requestWorker("estimate-area", "area-estimate");
-        return { noDownload, direct, plan, ready, inside, outside, suggestions, named, retagged, renamed, moved, imported, cached };
+        return { noDownload, direct, plan, ready, inside, outside, afterCancel, suggestions, named, retagged, renamed, moved, imported, cached };
       } finally { worker.terminate(); }
     }, planetURL);
     const { direct, plan, ready, suggestions, named, retagged, renamed, moved, imported, cached } = result;
     assert.equal(result.noDownload.type, "outside-download");
     assert.equal(result.inside.transport, "gob");
     assert.equal(result.inside.gets, 0);
+    assert.equal(result.afterCancel.transport, "gob");
+    assert.equal(result.afterCancel.gets, 0);
+    assert.deepEqual(result.afterCancel.features, result.inside.features);
     assert.equal(result.outside.type, "outside-download");
     assert.notEqual(direct.transport, "gob", "querying before activation uses the direct reader");
     const length = gob.readUInt32LE(68);

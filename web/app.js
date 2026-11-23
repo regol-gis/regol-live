@@ -143,7 +143,7 @@ function showAreaSize(estimate, hint = "Checking size…", retry = false) {
 
 function cancelAreaCheck(reuseSource) {
   clearTimeout(areaTimer);
-  if (checkingArea) backend.cancel(reuseSource);
+  if (checkingArea) backend.cancel({ reuseSource });
   checkingArea = false;
 }
 
@@ -206,15 +206,15 @@ function setBusy(value, reuseSource) {
   $("native-progress").hidden = !native || !value;
   if (native && value) $("native-phase").textContent = "Running query…";
 }
-function stop(resetWorker = busy && !compiling) {
+function stop({ interrupt = busy && !compiling, keepDownload = false } = {}) {
   compiling = false;
   locatingURL = null;
   clearTimeout(panTimer);
   generation++;
-  if (resetWorker) {
+  if (interrupt) {
     if (checkingArea) cancelAreaCheck();
-    else backend.cancel();
-    areaEstimate = null;
+    else backend.cancel({ keepDownload });
+    if (!keepDownload) areaEstimate = null;
   }
   if ($("area-dialog").open) $("area-dialog").close();
   setBusy(false);
@@ -1034,7 +1034,7 @@ function changedSource() {
   pendingPan = false;
   completion.close();
   positionedURL = null;
-  stop(true);
+  stop({ interrupt: true });
   backend.reset?.();
   resetDisplay();
   reference = null;
@@ -1094,7 +1094,8 @@ function loadExamples() {
 }
 $("query-language").onchange = () => {
   completion.close();
-  stop();
+  pendingPan = false;
+  stop({ keepDownload: true });
   if (sketch) endSketch();
   resetDisplay();
   drafts[overpassMode ? "overpass" : "regol"] = $("selector").value;

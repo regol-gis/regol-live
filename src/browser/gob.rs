@@ -1,6 +1,6 @@
 //! WASM interface for a worker-owned, incrementally populated GOL.
-use super::{INPUT, output};
-use crate::{Request, execute, geometry::project_box, query_limits};
+use super::{INPUT, cancellation_check, output};
+use crate::{Request, execute_cancellable, geometry::project_box, query_limits};
 use regol::gob::{GobCatalog, GobStore, TileEntry};
 use serde::Serialize;
 use serde_json::json;
@@ -126,7 +126,7 @@ pub extern "C" fn gob_query() -> usize {
             .with_borrow(|buf| serde_json::from_slice::<Request>(buf))
             .map_err(|error| error.to_string())?;
         store.take_missing_tile();
-        let result = execute(store.library(), request);
+        let result = execute_cancellable(store.library(), request, &cancellation_check());
         if let Some(tip) = store.take_missing_tile() {
             return Ok(output(&json!({ "missingTile": tip })));
         }

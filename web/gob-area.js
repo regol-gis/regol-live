@@ -221,14 +221,15 @@ export class GobArea {
     return candidate;
   }
 
-  async query(request, remaining) {
+  async query(request, remaining, signal) {
     const attempted = new Set();
     let engineMs = 0;
     for (;;) {
       writeInput(this.api, this.api.input_buffer, request);
       const start = performance.now();
-      const resultBytes = this.api.gob_query();
+      const resultBytes = await this.api.gob_query();
       engineMs += performance.now() - start;
+      signal?.throwIfAborted();
       const value = readOutput(this.api, resultBytes, GobQueryError);
       if (value.missingTile === undefined) return { value, resultBytes, engineMs };
       const tip = value.missingTile;
@@ -238,7 +239,7 @@ export class GobArea {
       const { loaded, offset, length } = readOutput(this.api, this.api.gob_entry(tip));
       if (loaded || length > remaining() || this.chunkBytes + length > maxAreaBytes)
         throw Error("The query needs more planet tiles than the browser can load.");
-      const bytes = await this.read(offset, length);
+      const bytes = await this.read(offset, length, signal);
       importTile(this.api, tip, bytes);
       this.chunks.set(tip, bytes);
       this.chunkBytes += length;

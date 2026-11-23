@@ -295,10 +295,16 @@ pub(super) async fn serve(options: Options) -> Result<(), Box<dyn Error>> {
         .file_name()
         .unwrap_or_default()
         .to_string_lossy();
+    let modified = std::fs::metadata(&options.file)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|age| age.as_millis() as u64);
     let config = format!(
         "export default {};",
         json!([{
-            "id":"native", "native":true, "label":label, "path":"./api/query", "view":view
+            "id":"native", "native":true, "label":label, "path":"./api/query", "view":view,
+            "modified":modified
         }])
     );
     let cpus = std::thread::available_parallelism()?.get();

@@ -19,6 +19,7 @@ export class RangeQueries {
       }
       if (data.id !== this.id || !this.foreground) return;
       const { receive, estimateOnly } = this.foreground;
+      if (data.type === "area-ready") this.hasDownload = data.tiles > 0;
       if (["result", "view", "area-ready", "outside-download", "error"].includes(data.type) ||
           (estimateOnly && data.type === "area-estimate")) {
         this.foreground = null;
@@ -76,6 +77,10 @@ export class RangeQueries {
     this.worker?.postMessage({ type: "confirm-area", id: this.id });
   }
 
+  allowLiveGol() {
+    this.worker?.postMessage({ type: "allow-live-gol", id: this.id });
+  }
+
   resume() {
     this.worker?.postMessage({ type: "continue" });
   }
@@ -98,6 +103,7 @@ export class RangeQueries {
     this.worker?.terminate();
     this.worker = null;
     this.snapshot = null;
+    this.hasDownload = false;
     this.area = false;
     this.id++;
   }

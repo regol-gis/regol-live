@@ -46,6 +46,18 @@ function fixture() {
 }
 
 const wrapped = [[179, 1, 180, 2], [-180, 1, -179, 2]];
+test("comparing a warm GOL with the GOB reads only cached metadata", async () => {
+  const { plan, network, source } = fixture();
+  source.cached = async () => null;
+  const area = plan();
+  assert.equal(await area.planFromCache(wrapped), null);
+  assert.deepEqual(network, []);
+  const expected = await area.plan(wrapped);
+  network.length = 0;
+  assert.deepEqual(await area.planFromCache(wrapped), expected);
+  assert.deepEqual(network, []);
+});
+
 test("estimate discovers only headers and downloads exactly the uncached blocks", async () => {
   const { bytes, starts, source, ahead, network, plan } = fixture();
   const area = plan();

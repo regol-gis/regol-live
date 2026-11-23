@@ -1,9 +1,9 @@
 import {
   RangeFile,
-  planetURL,
   summarizeReadTimings,
   transferAllowance,
 } from "./ranges.js";
+import { isPlanetFile, planetGobURL } from "./planet-files.js";
 import { ViewportReadAhead } from "./read-ahead.js";
 import { areaIndexFiles, hasNamedAreas } from "./named-areas.js";
 import { AreaDownload } from "./area-download.js";
@@ -89,6 +89,29 @@ function checkQuery() {
   return new Promise(resolve => setTimeout(() => resolve(Number(job.signal.aborted)), 0));
 }
 
+function beforeGolNetwork(current) {
+  current.signal.throwIfAborted();
+  if (!current.warnLiveGol) return;
+  if (!current.golDecision) {
+    // Parallel prefetches share one decision for this query.
+    const paused = performance.now();
+    current.golDecision = new Promise(resolve => {
+      current.allowGol = resolve;
+      current.signal.addEventListener("abort", resolve, { once: true });
+    }).then(() => {
+      current.signal.removeEventListener("abort", current.allowGol);
+      current.allowGol = null;
+      current.warnLiveGol = false;
+      current.pausedBefore = performance.now() - paused;
+      current.pausedMs += current.pausedBefore;
+      if (current.locateUntil) current.locateUntil += current.pausedBefore;
+      current.signal.throwIfAborted();
+    });
+    send({ type: "confirm-live-gol" });
+  }
+  return current.golDecision;
+}
+
 async function open(url, localFile) {
   api = null;
   source?.cache?.close();
@@ -103,6 +126,7 @@ async function open(url, localFile) {
     measureStorage,
   );
   source.signal = job.signal;
+  source.beforeNetwork = () => beforeGolNetwork(job);
   const remaining = () => job.limit - stats.bytes;
   const getPage = new WebAssembly.Suspending(
     async (offset, destination, length, sparse) => {
@@ -184,7 +208,7 @@ async function open(url, localFile) {
           page = await source.fetchRange(start, length);
           if (!sparse && ahead.pages.size < 4) ahead.remember(start, page);
         }
-        if (start === 0 && url === planetURL) snapshot = golPlanetSnapshot(page) ?? snapshot;
+        if (start === 0 && isPlanetFile(url, "gol")) snapshot = golPlanetSnapshot(page) ?? snapshot;
         new Uint8Array(api.memory.buffer, destination, length).set(page);
         return 1;
       } catch (error) {
@@ -196,22 +220,22 @@ async function open(url, localFile) {
     },
   );
   const areaFiles = areaIndexFiles(() => api.memory, url, () => job.areaIndex);
-  [api] = await Promise.all([
-    newEngine({
-      get_page: getPage,
-      suggestion_stopped: new WebAssembly.Suspending(checkSuggestion),
-      fetch_area_file: new WebAssembly.Suspending(async (...args) => {
-        const start = performance.now();
-        try {
-          return await areaFiles.fetch_area_file(...args, job.signal);
-        } finally {
-          job.pageMs += performance.now() - start;
-        }
-      }),
-      copy_area_file: areaFiles.copy_area_file,
+  // Complete the consent-gated open before starting the engine. Either failure
+  // can then finish this job without leaving an orphaned read or dialog.
+  await source.open();
+  api = await newEngine({
+    get_page: getPage,
+    suggestion_stopped: new WebAssembly.Suspending(checkSuggestion),
+    fetch_area_file: new WebAssembly.Suspending(async (...args) => {
+      const start = performance.now();
+      try {
+        return await areaFiles.fetch_area_file(...args, job.signal);
+      } finally {
+        job.pageMs += performance.now() - start;
+      }
     }),
-    source.open(),
-  ]);
+    copy_area_file: areaFiles.copy_area_file,
+  });
   // Without a validator, decoded geometry is reusable only within this open.
   snapshot = JSON.stringify([
     source.size,
@@ -234,11 +258,6 @@ async function open(url, localFile) {
   }
 }
 
-function refreshGolForFallback(gob) {
-  if (source?.url === planetURL &&
-      (source.invalidated || gob.invalidated || snapshot !== gob.snapshot)) api = null;
-}
-
 async function confirmArea(data, area, estimate, details) {
   const { signal } = area.controller;
   signal.throwIfAborted();
@@ -254,21 +273,33 @@ async function confirmArea(data, area, estimate, details) {
   return true;
 }
 
+function golDownload(localFile) {
+  return areaDownload ??= new AreaDownload(source, ahead, (start, length) => {
+    const ptr = api.cached_block(BigInt(start)) >>> 0;
+    return ptr ? new Uint8Array(api.memory.buffer, ptr, length) : null;
+  }, localFile);
+}
+
 async function gobDownload(data, area) {
   const { signal } = area.controller;
   let confirmed = false;
   try {
     if (!gobCatalog) {
-      const fresh = await GobArea.open(newGobEngine, (length, timing) => reportRead("gob", length, timing), signal);
+      const fresh = await GobArea.open(newGobEngine, (length, timing) => reportRead("gob", length, timing), signal, data.gobURL);
       if (gobActive?.snapshot !== fresh.snapshot) gobActive = null;
       gobCatalog = gobActive?.matchesArchive(fresh) ? gobActive : fresh;
     }
     const entries = gobCatalog.plan(job.windows);
     const estimate = gobCatalog.estimate(entries);
+    if (estimate.missing && api && source.url === data.url && !source.invalidated) {
+      source.signal = signal;
+      const warm = await golDownload(false).planFromCache(job.windows);
+      if (warm?.tiles && warm.missing < estimate.missing) return false;
+    }
     const covered = downloadTransport === "gol"
       ? source?.url === data.url && !source.invalidated && insideDownloadedArea(areaDownload?.downloadedWindows, job.windows)
       : gobCatalog === gobActive && insideDownloadedArea(gobActive?.downloadedWindows, job.windows);
-    const details = { snapshot: gobCatalog.snapshot, transport: "gob", covered };
+    const details = { snapshot: gobCatalog.snapshot, modified: gobCatalog.validator?.modified, transport: "gob", covered };
     confirmed = await confirmArea(data, area, estimate, details);
     if (confirmed) {
       const before = stats.bytes;
@@ -293,7 +324,6 @@ async function gobDownload(data, area) {
     }
     signal.throwIfAborted();
     if (confirmed) gobCatalog = null;
-    if (failed) refreshGolForFallback(failed);
     if (!gobCatalog) gobRetryAt = performance.now() + 60000;
     if (confirmed) send({ type: "area-fallback", ...stats });
     return false;
@@ -306,6 +336,7 @@ function sendResult(value, resultBytes, currentSnapshot, start, transport) {
     ...value,
     ...stats,
     snapshot: currentSnapshot,
+    modified: transport === "gob" ? gobActive.validator?.modified : source.modified,
     resultBytes,
     transport,
     elapsed: performance.now() - start - job.pausedMs,
@@ -327,15 +358,12 @@ async function gobQuery(start, request) {
   } catch (error) {
     if (error instanceof GobQueryError) throw error;
     if (gobActive.invalidated || error instanceof WebAssembly.RuntimeError) {
-      refreshGolForFallback(gobActive);
       if (gobCatalog === gobActive) gobCatalog = null;
       gobActive = null;
     }
     job.signal.throwIfAborted();
-    if (gobActive) refreshGolForFallback(gobActive);
     return false;
   }
-  refreshGolForFallback(gobActive);
   return false;
 }
 
@@ -364,6 +392,7 @@ async function run(data, area, suggestion, signal) {
     area,
     areaIndex: data.areaIndex,
     downloadedOnly: data.downloadedOnly === true,
+    warnLiveGol: !area && !suggestion && !data.downloadedOnly && data.warnLiveGol === true,
     suggestion,
     allowance,
     locate: data.locate,
@@ -401,7 +430,15 @@ async function run(data, area, suggestion, signal) {
       suggestion.nextYield = start + 12;
       timer = setTimeout(() => suggestion.controller.abort(), 1200);
     }
-    const publicPlanet = data.publicPlanet === true && data.url === planetURL;
+    const publicPlanet = data.publicPlanet === true && isPlanetFile(data.url, "gol");
+    if (publicPlanet) {
+      data.gobURL ??= planetGobURL;
+      if (!isPlanetFile(data.gobURL, "gob")) throw Error("Invalid planet archive URL.");
+      if ((gobCatalog?.url && gobCatalog.url !== data.gobURL) || (gobActive?.url && gobActive.url !== data.gobURL)) {
+        gobCatalog = gobActive = null;
+        gobRetryAt = 0;
+      }
+    }
     const indexedAreas = !area && !data.locate && !suggestion &&
       hasNamedAreas(data.request);
     const request = area || data.locate ? null : encoder.encode(JSON.stringify(data.request));
@@ -409,19 +446,20 @@ async function run(data, area, suggestion, signal) {
       return send({ type: "outside-download" });
     if (job.downloadedOnly && data.request.readWindows)
       job.windows = [...data.request.windows, ...job.windows];
-    if (publicPlanet && !suggestion) {
+    const coveredByGol = downloadTransport === "gol" && api && source.url === data.url &&
+      !source.invalidated && insideDownloadedArea(areaDownload?.downloadedWindows, job.windows);
+    if (publicPlanet && !suggestion && !coveredByGol) {
       if (area && (data.type === "plan-area" || performance.now() >= gobRetryAt)) {
         if (await gobDownload(data, area)) return;
       }
-      if (request && gobActive && (!job.downloadedOnly || downloadTransport === "gob")) {
-        // A named area can be outside every tile in the downloaded GOB view.
-        if (indexedAreas) refreshGolForFallback(gobActive);
-        else if (await gobQuery(start, request)) return;
-        else if (job.downloadedOnly) return send({ type: "outside-download" });
+      if (request && gobActive && !indexedAreas && (!job.downloadedOnly || downloadTransport === "gob")) {
+        if (await gobQuery(start, request)) return;
+        if (job.downloadedOnly) return send({ type: "outside-download" });
       }
     }
-    if (job.downloadedOnly && (downloadTransport !== "gol" || !api || source.url !== data.url || source.invalidated ||
-        !insideDownloadedArea(areaDownload?.downloadedWindows, job.windows))) return send({ type: "outside-download" });
+    if (job.downloadedOnly && !coveredByGol) return send({ type: "outside-download" });
+    // The two planet files can be published days apart. RangeFile validates
+    // its own GOL on network reads, independently of the active GOB archive.
     usingGol = true;
     if (!api || source.url !== data.url || source.invalidated) {
       if (area) area.opening = true;
@@ -435,13 +473,9 @@ async function run(data, area, suggestion, signal) {
     if (area) {
       if (area.stopAfterOpen) return;
       signal.throwIfAborted();
-      areaDownload ??= new AreaDownload(source, ahead, (start, length) => {
-        const ptr = api.cached_block(BigInt(start)) >>> 0;
-        return ptr ? new Uint8Array(api.memory.buffer, ptr, length) : null;
-      }, data.localFile === true);
-      const estimate = await areaDownload.plan(job.windows);
+      const estimate = await golDownload(data.localFile === true).plan(job.windows);
       const covered = downloadTransport === "gol" && insideDownloadedArea(areaDownload.downloadedWindows, job.windows);
-      if (!await confirmArea(data, area, estimate, { snapshot, covered })) return;
+      if (!await confirmArea(data, area, estimate, { snapshot, modified: source.modified, covered })) return;
       const before = stats.bytes;
       await areaDownload.download();
       downloadTransport = "gol";
@@ -502,6 +536,10 @@ async function run(data, area, suggestion, signal) {
 let pendingArea, pendingSuggestion, queue = Promise.resolve();
 const queries = new Map();
 onmessage = ({ data }) => {
+  if (data.type === "allow-live-gol") {
+    if (job?.id === data.id) job.allowGol?.();
+    return;
+  }
   if (data.type === "cancel-query") {
     queries.get(data.id)?.abort();
     if (job?.id === data.id) job.resume?.();

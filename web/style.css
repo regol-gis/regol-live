@@ -115,12 +115,21 @@ select:focus-visible {
   font-variant-numeric: tabular-nums;
 }
 .dataset {
-  display: flex;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   min-width: 0;
-  gap: 0.75rem;
+  gap: 0.1rem 0.75rem;
   color: var(--muted);
   font-size: 0.875rem;
+}
+#dataset-date {
+  grid-column: 2;
+  font-size: 0.72rem;
+  line-height: 1.1;
+}
+#dataset-date:empty {
+  display: none;
 }
 .dataset select {
   min-width: 0;
@@ -376,6 +385,12 @@ dialog {
 }
 #area-status {
   margin: 0;
+}
+#live-gol-copy {
+  margin: 0 0 1rem;
+}
+#live-gol-dialog .dialog-actions {
+  flex-wrap: wrap;
 }
 dialog[open] {
   display: flex;
@@ -876,10 +891,20 @@ details summary {
     padding-inline: 0.45rem;
   }
   .dataset {
-    flex-direction: column;
-    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0;
     font-size: 0.72rem;
+  }
+  .dataset label {
+    position: absolute;
+    clip-path: inset(50%);
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+  #dataset-date {
+    grid-column: 1;
+    font-size: 0.66rem;
   }
   .dataset select {
     max-width: 100%;

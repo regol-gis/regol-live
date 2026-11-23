@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { GobArea, GobQueryError, planetGobURL } from "../web/gob-area.js";
+import { AreaDownload } from "../web/area-download.js";
 import { RangeQueries } from "../web/query-backend.js";
 import { RangeFile, planetURL } from "../web/ranges.js";
 
@@ -154,14 +155,18 @@ test("switching datasets discards the worker even with an area estimate in fligh
 test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid downloaded tiles", { timeout: 3000 }, async (t) => {
   const file = new Uint8Array(await readFile(new URL("./fixtures/geography.gol", import.meta.url)));
   let golOpens = 0;
+  let golSource;
   let pauseOpen;
   t.mock.method(RangeFile.prototype, "open", async function () {
     golOpens++;
+    golSource = this;
     await pauseOpen?.(this.signal);
     this.size = file.length;
     this.modified = modified;
   });
   t.mock.method(RangeFile.prototype, "read", async (start, length) => file.slice(start, start + length));
+  // Exercise failed archive imports with a more expensive GOL alternative.
+  t.mock.method(AreaDownload.prototype, "planFromCache", async () => ({ tiles: 1, missing: 16 }));
   t.mock.method(globalThis, "fetch", async () => new Response());
   t.mock.method(WebAssembly, "compileStreaming", async () => ({}));
   t.mock.method(WebAssembly, "instantiate", async () => {
@@ -250,21 +255,22 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   send(3, "confirm-area");
   await initial.finished;
   assert.equal(messages.at(-1).type, "area-ready");
-  assert.equal(golOpens, 2, "GOL fallback reopens a previously used source with a different snapshot");
+  assert.equal(golOpens, 1, "a different GOB snapshot leaves the open GOL usable");
 
-  const cancelled = await plan(4);
+  const wider = { windows: [[-2, -2, 2, 2]] };
+  const cancelled = await plan(4, wider);
   assert.equal(opened, 3, "retrying a failed download opens a fresh archive catalog");
   send(4, "cancel-area");
   await cancelled.finished;
   assert(!messages.some(({ id, type }) => id === 4 && (type === "area-ready" || type === "area-fallback")));
 
   downloadFails = false;
-  const activate = await plan(5);
+  const activate = await plan(5, wider);
   send(5, "confirm-area");
   await activate.finished;
   await send(6, "query");
   assert.equal(messages.at(-1).message, "Invalid selector");
-  assert.equal(golOpens, 2, "application errors do not reopen GOL");
+  assert.equal(golOpens, 1, "application errors do not reopen GOL");
 
   const entered = new Promise(resolve => { pendingQuery = resolve; });
   const running = send(60, "query");
@@ -275,7 +281,7 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   await Promise.all([running, queued]);
   pendingQuery = null;
   assert(!messages.some(message => [60, 61].includes(message.id)));
-  assert.equal(golOpens, 2, "cancellation never falls back to the GOL");
+  assert.equal(golOpens, 1, "cancellation never falls back to the GOL");
   await send(62, "estimate-area");
   assert.equal(messages.at(-1).covered, true);
   assert.equal(messages.at(-1).missing, 0);
@@ -289,7 +295,9 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   send(7, "confirm-area");
   await replacement.finished;
   assert.equal(messages.at(-1).type, "area-ready");
-  assert.equal(golOpens, 3);
+  assert.equal(golOpens, 1);
+  await send(71, "query", true, { windows: east });
+  assert.equal(messages.at(-1).transport, undefined, "the active direct download serves queries inside its bounds");
   queryMode = "success";
   await send(8, "query");
   assert.equal(messages.at(-1).transport, "gob", "a recoverable replacement failure keeps the completed GOB store");
@@ -300,7 +308,7 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   send(9, "cancel-area");
   await refreshed.finished;
 
-  const failedAgain = await plan(10, { windows: east });
+  const failedAgain = await plan(10, { windows: [[1, 0, 3, 1]] });
   const fallbackAgain = next("area-estimate");
   send(10, "confirm-area");
   await fallbackAgain;
@@ -315,7 +323,7 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   await send(12, "query");
   assert.equal(messages.at(-1).type, "result");
   assert.equal(messages.at(-1).transport, undefined, "a fresh revision makes the previous GOB store stale");
-  assert.equal(golOpens, 4);
+  assert.equal(golOpens, 1);
 
   downloadFails = false;
   const activateChanged = await plan(13);
@@ -325,7 +333,10 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   await send(14, "query");
   assert.equal(messages.at(-1).type, "result");
   assert.equal(messages.at(-1).transport, undefined);
-  assert.equal(golOpens, 5, "GOB invalidation reopens GOL before re-executing the whole query");
+  assert.equal(golOpens, 1, "GOB invalidation leaves the independent GOL reader warm");
+  golSource.invalidated = true;
+  await send(141, "query");
+  assert.equal(golOpens, 2, "a change to the GOL itself reopens its reader");
 
   const customURL = "https://example.test/local.gol";
   let openedSignal;
@@ -340,7 +351,7 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   releaseOpen();
   await Promise.all([interrupted, foreground]);
   assert.equal(signal.aborted, false);
-  assert.equal(golOpens, 6, "the next query reuses the superseded same-source bootstrap");
+  assert.equal(golOpens, 3, "the next query reuses the superseded same-source bootstrap");
   assert(!messages.some(({ id, type }) => id === 15 && type === "area-estimate"));
   assert.equal(messages.at(-1).type, "result");
 });

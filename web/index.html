@@ -29,13 +29,15 @@
           Download this area
           <span id="area-size">Checking size…</span>
         </button>
-        <label class="dataset">Dataset
-          <select id="dataset">
-            <option value="monaco">Monaco · January 2026</option>
+        <div class="dataset">
+          <label for="dataset">Dataset</label>
+          <select id="dataset" aria-describedby="dataset-date">
+            <option value="monaco">Monaco</option>
             <option value="planet" selected>OpenPlanetData · Planet</option>
             <option value="custom">Custom GOL URL…</option>
           </select>
-        </label>
+          <small id="dataset-date"></small>
+        </div>
         <button id="open-about" aria-haspopup="dialog" aria-controls="about-dialog">About</button>
       </div>
     </header>
@@ -351,6 +353,18 @@
         <p id="about-version" role="status">Loading version…</p>
       </div>
       <form method="dialog" class="dialog-actions"><button autofocus>Close</button></form>
+    </dialog>
+    <dialog id="live-gol-dialog" aria-labelledby="live-gol-title" aria-describedby="live-gol-copy">
+      <div class="dialog-heading"><h2 id="live-gol-title">Run a live GOL query?</h2></div>
+      <div class="dialog-body">
+        <p id="live-gol-copy"></p>
+        <label class="toggle"><input id="skip-live-gol-warning" type="checkbox" /> Don’t show again</label>
+      </div>
+      <div class="dialog-actions">
+        <button id="cancel-live-gol">Cancel</button>
+        <button id="allow-live-gol">Run anyway</button>
+        <button id="download-before-query" class="primary">Download this area</button>
+      </div>
     </dialog>
     <dialog id="area-dialog" aria-labelledby="area-title">
       <div class="dialog-heading"><h2 id="area-title">Download this area</h2></div>

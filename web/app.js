@@ -1,6 +1,6 @@
 import { executionPlan, emptyReferenceNotes } from "./query-plan.js";
 import localDatasets from "./local-datasets.js";
-import { planetURL } from "./ranges.js";
+import { discoverPlanetFiles, isPlanetFile, planetURL, utcDate } from "./planet-files.js";
 import { hostedPlanetIndexURL } from "./named-areas.js";
 import { hostedPages } from "./site-mode.js";
 import {
@@ -77,6 +77,60 @@ if (
 const localSource = () =>
   localDatasets.find((item) => item.id === $("dataset").value);
 const demo = new URL("./data/monaco-2026-01-01.gol", location.href).href;
+let mapReady = false, planetFiles, planetDiscovery;
+const observedDates = new Map();
+const formatDate = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
+const shortDate = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
+function showDatasetDate() {
+  const field = $("dataset-date");
+  const dataset = $("dataset").value;
+  const displayDate = (value, short = false) => value ? (short ? shortDate : formatDate).format(new Date(value)) : "date unknown";
+  if (dataset === "planet") {
+    field.title = "OpenPlanetData publication dates (UTC)";
+    if (!planetFiles) {
+      field.textContent = "Checking dates…";
+      return;
+    }
+    const date = file => file.dated ? file.date : observedDates.get(file.url) ?? file.date;
+    const gol = date(planetFiles.gol), gob = date(planetFiles.gob);
+    field.textContent = gol === gob ? (gol ? displayDate(gol) : "Date unavailable") :
+      `GOL ${displayDate(gol, gol && gob && gol.slice(0, 4) === gob.slice(0, 4))} · GOB ${displayDate(gob)}`;
+  } else if (dataset === "monaco") {
+    field.title = "OpenStreetMap extract date";
+    field.textContent = displayDate("2026-01-01");
+  } else {
+    let date;
+    try { date = observedDates.get(datasetURL()) ?? utcDate(localSource()?.modified); } catch {}
+    field.title = "File modification date (UTC)";
+    field.textContent = date ? "Updated " + displayDate(date) : "";
+  }
+}
+
+function observeDate(url, data) {
+  const date = utcDate(data.modified);
+  if (!date) return;
+  const file = data.transport === "gob" ? planetFiles?.gob.url : url;
+  if (file && observedDates.get(file) !== date) {
+    observedDates.set(file, date);
+    showDatasetDate();
+  }
+}
+
+function prepareDataset() {
+  const planet = $("dataset").value === "planet";
+  ready = mapReady && (!planet || Boolean(planetFiles));
+  $("run").disabled = !ready;
+  showDatasetDate();
+  if (planet && !planetDiscovery) {
+    planetDiscovery = discoverPlanetFiles().then(files => {
+      planetFiles = files;
+      if ($("dataset").value !== "planet") return;
+      prepareDataset();
+      scheduleAreaCheck();
+      run("auto");
+    });
+  }
+}
 let queriesActive = Boolean(native),
   busy = false,
   compiling = false,
@@ -115,6 +169,9 @@ const completion = initTagCompletion({
   } : null,
 });
 let timeoutTimer;
+const golWarningKey = "regol-live.skip-live-gol-warning";
+let skipGolWarning = false;
+try { skipGolWarning = localStorage.getItem(golWarningKey) === "1"; } catch {}
 const drafts = { regol: examples.get("Cafés"), overpass: overpassExamples.get("Cafés") };
 let areaEstimate = null, areaTimer, checkingArea = false;
 let panPreferred = $("auto").checked, pendingPan = false;
@@ -173,6 +230,7 @@ function scheduleAreaCheck(clear = false) {
     backend.run({
       type: "estimate-area", url, localFile: localSource()?.localFile === true,
       publicPlanet: $("dataset").value === "planet",
+      gobURL: planetFiles?.gob.url,
       request: { windows: queryWindows() },
     }, (data) => {
       if (data.type === "error") {
@@ -180,6 +238,7 @@ function scheduleAreaCheck(clear = false) {
         fail(data.message);
       } else if (data.type === "area-estimate") {
         checkingArea = false;
+        observeDate(url, data);
         showAreaSize(data);
         if (pendingPan) {
           pendingPan = false;
@@ -206,7 +265,7 @@ function setBusy(value, reuseSource) {
   $("native-progress").hidden = !native || !value;
   if (native && value) $("native-phase").textContent = "Running query…";
 }
-function stop({ interrupt = busy && !compiling, keepDownload = false } = {}) {
+function stop({ interrupt = busy && !compiling, keepDownload = backend.hasDownload } = {}) {
   compiling = false;
   locatingURL = null;
   clearTimeout(panTimer);
@@ -217,6 +276,7 @@ function stop({ interrupt = busy && !compiling, keepDownload = false } = {}) {
     if (!keepDownload) areaEstimate = null;
   }
   if ($("area-dialog").open) $("area-dialog").close();
+  if ($("live-gol-dialog").open) $("live-gol-dialog").close();
   setBusy(false);
 }
 function closeDetail() {
@@ -365,7 +425,7 @@ function datasetURL() {
   const local = localSource();
   if (local) return new URL(local.path, location.href).href;
   if ($("dataset").value === "monaco") return demo;
-  if ($("dataset").value === "planet") return planetURL;
+  if ($("dataset").value === "planet") return planetFiles?.gol.url ?? planetURL;
   const raw = $("url").value.trim();
   if (!raw) throw Error("Enter a GOL URL.");
   const url = new URL(raw, location.href);
@@ -591,7 +651,43 @@ async function downloadResults() {
   }
 }
 
-async function run(reason = "manual") {
+function confirmLiveGol(allow) {
+  const dialog = $("live-gol-dialog");
+  const download = $("download-before-query");
+  download.hidden = Boolean(areaEstimate?.covered);
+  $("live-gol-copy").textContent = download.hidden
+    ? "This view is already downloaded. This query still needs data from the remote GOL. Run anyway to fetch it."
+    : "This query needs data from the remote GOL and may transfer many megabytes. Download this area to reuse its tiles across queries, then run your query again.";
+  const skip = $("skip-live-gol-warning");
+  skip.checked = false;
+  function rememberChoice() {
+    if (!skip.checked) return;
+    skipGolWarning = true;
+    try { localStorage.setItem(golWarningKey, "1"); } catch {}
+  }
+  $("allow-live-gol").onclick = () => {
+    rememberChoice();
+    dialog.close();
+    allow();
+  };
+  download.onclick = () => {
+    rememberChoice();
+    stop({ keepDownload: true });
+    downloadArea();
+  };
+  $("cancel-live-gol").onclick = () => {
+    stop({ keepDownload: true });
+    status("Query cancelled.");
+  };
+  dialog.oncancel = (event) => {
+    event.preventDefault();
+    $("cancel-live-gol").click();
+  };
+  dialog.showModal();
+  (download.hidden ? $("cancel-live-gol") : download).focus();
+}
+
+async function run(reason = "manual", approvedGol = false) {
   if (reason === "pan" && downloadGatesPan && !areaEstimate?.covered) return;
   pendingPan = false;
   const submittedCamera = cameraMoves;
@@ -656,8 +752,35 @@ async function run(reason = "manual") {
     return;
   }
   status(locate ? "Finding a starting location…" : "Running query…");
+  let remainingMs = locate ? 0 : (request.timeout ?? 0) * 1000;
+  let deadline;
+  function startTimeout() {
+    if (locate || !request.timeout) return;
+    deadline = performance.now() + remainingMs;
+    timeoutTimer = setTimeout(() => {
+      if (generation !== current) return;
+      stop();
+      status(`Query timed out after ${request.timeout} seconds.`, true);
+    }, remainingMs);
+  }
   const receive = (data) => {
     if (current !== generation) return;
+    observeDate(url, data);
+    if (data.type === "confirm-live-gol") {
+      if (deadline !== undefined) {
+        clearTimeout(timeoutTimer);
+        remainingMs = Math.max(0, deadline - performance.now());
+      }
+      status("Waiting for your choice before reading the remote GOL.");
+      confirmLiveGol(() => {
+        if (current !== generation) return;
+        approvedGol = true;
+        status(locate ? "Finding a starting location…" : "Running query…");
+        startTimeout();
+        backend.allowLiveGol();
+      });
+      return;
+    }
     if (data.type === "native-progress") {
       const parts = [data.receiving ? "Receiving results" : "Running query"];
       if (!data.receiving && data.scan) {
@@ -680,7 +803,7 @@ async function run(reason = "manual") {
         }
         setDatasetView(data.view);
       }
-      run();
+      run(reason, approvedGol);
       return;
     }
     if (data.type === "progress" && locate) return;
@@ -795,25 +918,22 @@ async function run(reason = "manual") {
       );
     }
   };
-  if (!locate && request.timeout) {
-    timeoutTimer = setTimeout(() => {
-      if (generation !== current) return;
-      stop();
-      status(`Query timed out after ${request.timeout} seconds.`, true);
-    }, request.timeout * 1000);
-  }
-  const areaIndex = localSource()?.areaIndex ?? (url === planetURL ? hostedPlanetIndexURL : null);
+  startTimeout();
+  const areaIndex = localSource()?.areaIndex ?? (isPlanetFile(url, "gol") ? hostedPlanetIndexURL : null);
   backend.run(
     {
       locate,
       url,
       request,
       downloadedOnly: downloadGatesPan && reason === "pan",
+      warnLiveGol: !native && !approvedGol && !skipGolWarning && !localSource()?.localFile &&
+        (new URL(url).origin !== location.origin || (hostedPages && $("dataset").value === "custom")),
       pauseAtTransferLimit: true,
       areaIndex: areaIndex && new URL(areaIndex, location.href).href,
       localFile: localSource()?.localFile === true,
       hints: localSource()?.hints && new URL(localSource().hints, location.href).href,
       publicPlanet: $("dataset").value === "planet",
+      gobURL: planetFiles?.gob.url,
     },
     receive,
     fail,
@@ -856,9 +976,11 @@ function downloadArea() {
   backend.run({
     type: "plan-area", url, localFile: localSource()?.localFile === true,
     publicPlanet: $("dataset").value === "planet",
+    gobURL: planetFiles?.gob.url,
     request: { windows: queryWindows() },
   }, (data) => {
     if (current !== generation) return;
+    observeDate(url, data);
     if (data.type === "error") {
       if (data.invalidated) resetDisplay();
       dialog.close();
@@ -1034,7 +1156,8 @@ function changedSource() {
   pendingPan = false;
   completion.close();
   positionedURL = null;
-  stop({ interrupt: true });
+  prepareDataset();
+  stop({ interrupt: true, keepDownload: false });
   backend.reset?.();
   resetDisplay();
   reference = null;
@@ -1054,6 +1177,7 @@ function changedSource() {
 $("dataset").onchange = changedSource;
 $("url").oninput = () => {
   completion.close();
+  showDatasetDate();
   if (locatingURL) {
     stop();
     status("Run the query to open this URL.");
@@ -1173,6 +1297,7 @@ document.addEventListener("keydown", (e) => {
     else closeDetail();
   }
 });
+prepareDataset();
 setBusy(false);
 if (downloadGatesPan) {
   for (const item of document.querySelectorAll("[data-parent-filter]")) item.hidden = true;
@@ -1204,8 +1329,8 @@ try {
       }
     },
     onReady() {
-      ready = true;
-      $("run").disabled = false;
+      mapReady = true;
+      prepareDataset();
       scheduleAreaCheck();
       updateExportButton();
       showCamera();

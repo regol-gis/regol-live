@@ -26,13 +26,13 @@ export class AreaDownload {
 
   stored = (start) => this.source.cache?.known.has(start) === true;
 
-  async catalogBytes(start, length) {
+  async catalogBytes(start, length, reader) {
     const end = start + length;
     if (end > this.source.size) throw Error("The GOL tile directory exceeds the file.");
     const offsets = [];
     for (let p = align(start, blockBytes); p < end; p += blockBytes) offsets.push(p);
     const result = new Uint8Array(length);
-    await readBlocks(this.source, offsets, this.memory, (p, bytes) => {
+    await readBlocks(reader, offsets, this.memory, (p, bytes) => {
       const from = Math.max(p, start);
       result.set(bytes.subarray(from - p, end - p), from - start);
       this.keepHeader(p, bytes);
@@ -54,10 +54,28 @@ export class AreaDownload {
     }
   }
 
-  async plan(windows) {
+  async planFromCache(windows) {
+    const { source } = this;
+    const reader = {
+      size: source.size, cache: source.cache, signal: source.signal,
+      read: async (start, length) => {
+        const bytes = await source.cached(start, length);
+        if (!bytes) throw Error("GOL metadata is missing from cache.");
+        return bytes;
+      },
+    };
+    try {
+      return await this.plan(windows, reader);
+    } catch {
+      source.signal?.throwIfAborted();
+      return null;
+    }
+  }
+
+  async plan(windows, reader = this.source) {
     const { source, ahead } = this;
     const catalog = ahead.catalog ??= await readCatalog(
-      (start, length) => this.catalogBytes(start, length), source.size,
+      (start, length) => this.catalogBytes(start, length, reader), source.size,
     );
     const starts = new Set();
     for (const window of windows) {
@@ -76,7 +94,7 @@ export class AreaDownload {
       const inDirectory = p < catalog.directory[1] && p + blockBytes > catalog.directory[0];
       if (!headerBlocks.has(p) && !inDirectory && p >= catalog.metadataEnd) this.headers.delete(p);
     }
-    await readBlocks(source, headerBlocks, this.memory, (p, bytes) => this.keepHeader(p, bytes));
+    await readBlocks(reader, headerBlocks, this.memory, (p, bytes) => this.keepHeader(p, bytes));
     // A completed download retains its own page set while the next view is sized.
     this.pages = new Set();
     this.addPages(0, catalog.metadataEnd);

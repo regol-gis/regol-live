@@ -1,7 +1,7 @@
 import { fetchByteRange, readBody } from "./ranges.js";
+import { planetGobURL } from "./planet-files.js";
+export { planetGobURL } from "./planet-files.js";
 
-export const planetGobURL =
-  "https://download.openplanetdata.com/osm/planet/gob/v1/planet-latest.osm.gob";
 const headerLength = 64;
 const maxPrefixBytes = 4 * 1024 * 1024;
 const maxAreaBytes = 128 * 1024 * 1024;
@@ -72,8 +72,8 @@ export class GobArea {
   chunks = new Map();
   chunkBytes = 0;
 
-  static async open(engine, progress, signal) {
-    const area = new GobArea(engine, progress);
+  static async open(engine, progress, signal, url = planetGobURL) {
+    const area = new GobArea(engine, progress, url);
     const header = await area.read(0, headerLength, signal, 10000);
     const view = new DataView(header.buffer);
     const prefixLength = 68 + 8 * view.getUint32(28, true) + view.getUint32(48, true);
@@ -102,7 +102,8 @@ export class GobArea {
     return area;
   }
 
-  constructor(engine, progress) {
+  constructor(engine, progress, url) {
+    this.url = url;
     this.engine = engine;
     this.progress = progress;
   }
@@ -116,7 +117,7 @@ export class GobArea {
   async read(offset, length, signal, timeout) {
     const start = performance.now();
     const end = offset + length - 1;
-    const response = await fetchByteRange(planetGobURL, offset, end, signal, timeout);
+    const response = await fetchByteRange(this.url, offset, end, signal, timeout);
     const headersAt = performance.now();
     const etag = response.headers.get("ETag");
     const modified = response.headers.get("Last-Modified");
@@ -203,7 +204,7 @@ export class GobArea {
     await Promise.all(Array.from({ length: Math.min(ranges.length, maxConcurrentRanges) }, fetchRanges));
     signal.throwIfAborted();
     if (failure) throw failure;
-    const candidate = new GobArea(this.engine, this.progress);
+    const candidate = new GobArea(this.engine, this.progress, this.url);
     const api = await this.engine();
     signal.throwIfAborted();
     openPrefix(api, this.prefix);

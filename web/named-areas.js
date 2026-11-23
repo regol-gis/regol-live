@@ -1,4 +1,4 @@
-import { planetURL } from "./ranges.js";
+import { isPlanetFile } from "./planet-files.js";
 
 export const hostedPlanetIndexURL = new URL("./datasets/planet.gol.areas", import.meta.url).href;
 const utf8 = new TextDecoder();
@@ -65,7 +65,7 @@ export function areaIndexFiles(memory, golURL, indexURL) {
       const isManifest = path === "manifest.json";
       if (isManifest) storage = undefined;
       const index = indexURL();
-      const openPlanetSnapshot = isManifest && golURL === planetURL && index === hostedPlanetIndexURL && snapshotSize
+      const openPlanetSnapshot = isManifest && isPlanetFile(golURL, "gol") && index === hostedPlanetIndexURL && snapshotSize
         ? utf8.decode(new Uint8Array(memory().buffer, snapshotPtr >>> 0, snapshotSize))
         : undefined;
       const url = new URL(index ?? golURL);

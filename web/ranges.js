@@ -1,7 +1,7 @@
 import { RangeCache } from "./range-cache.js";
+import { isPlanetFile } from "./planet-files.js";
+export { planetURL } from "./planet-files.js";
 
-export const planetURL =
-  "https://download.openplanetdata.com/osm/planet/gol/v2/planet-latest.osm.gol";
 export const pageBytes = 128 * 1024;
 export const transferAllowance = (localFile) =>
   (localFile ? 256 : 48) * 1024 * 1024;
@@ -77,9 +77,10 @@ export class RangeFile {
     this.measureStorage = measureStorage;
   }
   async open() {
+    await this.beforeNetwork?.();
     const start = performance.now();
     let response;
-    if (this.url === planetURL) {
+    if (isPlanetFile(this.url, "gol")) {
       response = await fetch(this.url, {
         ...options,
         method: "HEAD",
@@ -111,7 +112,7 @@ export class RangeFile {
       await reject(response, "Invalid dataset size.");
     this.etag = response.headers.get("ETag");
     this.modified = response.headers.get("Last-Modified");
-    if (this.url !== planetURL) {
+    if (!isPlanetFile(this.url, "gol")) {
       const headersAt = performance.now();
       this.first = await readBody(response, Math.min(this.size, pageBytes));
       this.firstTiming = this.timing(start, headersAt, response);
@@ -165,13 +166,14 @@ export class RangeFile {
       await this.persist(start, data);
       return data;
     }
+    await this.beforeNetwork?.();
     const began = performance.now();
     const end = start + length - 1;
     const response = await fetchByteRange(this.url, start, end, this.signal);
     const headersAt = performance.now();
     const range = response.headers.get("Content-Range");
     if (
-      (this.url !== planetURL || range !== null) &&
+      (!isPlanetFile(this.url, "gol") || range !== null) &&
       range !== `bytes ${start}-${end}/${this.size}`
     ) {
       this.invalidated = true;

@@ -1,5 +1,5 @@
 import { RangeCache } from "./range-cache.js";
-import { isPlanetFile } from "./planet-files.js";
+import { isPlanetFile, utcDate } from "./planet-files.js";
 export { planetURL } from "./planet-files.js";
 
 export const pageBytes = 128 * 1024;
@@ -76,7 +76,7 @@ export class RangeFile {
     this.cacheHit = cacheHit;
     this.measureStorage = measureStorage;
   }
-  async open() {
+  async open(expectedDate) {
     await this.beforeNetwork?.();
     const start = performance.now();
     let response;
@@ -89,6 +89,8 @@ export class RangeFile {
       if (!response.ok) throw new Error("The planet snapshot is unavailable.");
       this.size = Number(response.headers.get("Content-Length"));
       this.modified = response.headers.get("Last-Modified");
+      if (expectedDate && utcDate(this.modified) !== expectedDate)
+        throw Error("The planet GOL has changed since the date was selected. Reload to select the current dataset.");
       if (!this.modified)
         throw new Error(
           "The planet snapshot has no visible modification date.",

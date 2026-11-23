@@ -80,21 +80,21 @@ const demo = new URL("./data/monaco-2026-01-01.gol", location.href).href;
 let mapReady = false, planetFiles, planetDiscovery;
 const observedDates = new Map();
 const formatDate = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
-const shortDate = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
 function showDatasetDate() {
   const field = $("dataset-date");
   const dataset = $("dataset").value;
-  const displayDate = (value, short = false) => value ? (short ? shortDate : formatDate).format(new Date(value)) : "date unknown";
+  const displayDate = value => formatDate.format(new Date(value));
   if (dataset === "planet") {
-    field.title = "OpenPlanetData publication dates (UTC)";
+    field.title = planetFiles && !planetFiles.gob
+      ? "OpenPlanetData publication date (UTC). Downloads and queries use the same GOL."
+      : "OpenPlanetData publication date (UTC)";
     if (!planetFiles) {
       field.textContent = "Checking dates…";
       return;
     }
-    const date = file => file.dated ? file.date : observedDates.get(file.url) ?? file.date;
-    const gol = date(planetFiles.gol), gob = date(planetFiles.gob);
-    field.textContent = gol === gob ? (gol ? displayDate(gol) : "Date unavailable") :
-      `GOL ${displayDate(gol, gol && gob && gol.slice(0, 4) === gob.slice(0, 4))} · GOB ${displayDate(gob)}`;
+    const { gol, gob } = planetFiles;
+    const date = gob || gol.dated ? gol.date : observedDates.get(gol.url) ?? gol.date;
+    field.textContent = date ? displayDate(date) : "Date unavailable";
   } else if (dataset === "monaco") {
     field.title = "OpenStreetMap extract date";
     field.textContent = displayDate("2026-01-01");
@@ -109,11 +109,21 @@ function showDatasetDate() {
 function observeDate(url, data) {
   const date = utcDate(data.modified);
   if (!date) return;
-  const file = data.transport === "gob" ? planetFiles?.gob.url : url;
+  const file = data.transport === "gob" ? planetFiles?.gob?.url : url;
   if (file && observedDates.get(file) !== date) {
     observedDates.set(file, date);
     showDatasetDate();
   }
+}
+
+function planetOptions() {
+  if ($("dataset").value !== "planet" || !planetFiles) return {};
+  const { gol, gob } = planetFiles;
+  return {
+    publicPlanet: true, gobURL: gob?.url,
+    golDate: gob && !gol.dated ? gol.date : null,
+    gobDate: gob?.dated ? null : gob?.date,
+  };
 }
 
 function prepareDataset() {
@@ -166,6 +176,7 @@ const completion = initTagCompletion({
   backend,
   source: () => ready && !busy ? {
     url: datasetURL(), windows: queryWindows(), localFile: localSource()?.localFile === true,
+    ...planetOptions(),
   } : null,
 });
 let timeoutTimer;
@@ -229,8 +240,7 @@ function scheduleAreaCheck(clear = false) {
     };
     backend.run({
       type: "estimate-area", url, localFile: localSource()?.localFile === true,
-      publicPlanet: $("dataset").value === "planet",
-      gobURL: planetFiles?.gob.url,
+      ...planetOptions(),
       request: { windows: queryWindows() },
     }, (data) => {
       if (data.type === "error") {
@@ -932,8 +942,7 @@ async function run(reason = "manual", approvedGol = false) {
       areaIndex: areaIndex && new URL(areaIndex, location.href).href,
       localFile: localSource()?.localFile === true,
       hints: localSource()?.hints && new URL(localSource().hints, location.href).href,
-      publicPlanet: $("dataset").value === "planet",
-      gobURL: planetFiles?.gob.url,
+      ...planetOptions(),
     },
     receive,
     fail,
@@ -975,8 +984,7 @@ function downloadArea() {
   };
   backend.run({
     type: "plan-area", url, localFile: localSource()?.localFile === true,
-    publicPlanet: $("dataset").value === "planet",
-    gobURL: planetFiles?.gob.url,
+    ...planetOptions(),
     request: { windows: queryWindows() },
   }, (data) => {
     if (current !== generation) return;

@@ -25,20 +25,29 @@ test("chooses the newest common UTC day and prefers an addressable dated file", 
   }
 });
 
-test("accepts the seventh UTC day and falls back to individual dates outside the window", () => {
+test("accepts the seventh UTC day and uses one GOL when there is no eligible pair", () => {
   const latest = [row("gol", "2026-11-23", "latest"), row("gob", "2026-11-22", "latest")];
   const pair = date => [row("gol", date), row("gob", date)];
   assert.equal(selectPlanetFiles([...latest, ...pair("2026-11-17")], now).gol.date, "2026-11-17");
   const files = selectPlanetFiles([...latest, ...pair("2026-11-16"), ...pair("2026-11-24")], now);
   assert.equal(files.gol.date, "2026-11-23");
-  assert.equal(files.gob.date, "2026-11-22");
   assert.equal(files.gol.url, planetURL);
-  assert.equal(files.gob.url, planetGobURL);
+  assert.equal(files.gob, null);
 });
 
-test("missing catalog records leave the rolling files available with unknown dates", () => {
+test("an old listing for the same rolling URL cannot provide a historical GOL", () => {
+  const rows = [row("gol", "2026-11-22", "latest"), row("gob", "2026-11-22", "latest"),
+    row("gol", "2026-11-23", "latest")];
+  for (const files of [rows, rows.toReversed()]) {
+    const result = selectPlanetFiles(files, now);
+    assert.equal(result.gol.date, "2026-11-23");
+    assert.equal(result.gob, null);
+  }
+});
+
+test("missing catalog records leave only the rolling GOL available", () => {
   const wrong = { ...row("gol", "2026-11-23"), remote_version: "v1" };
   const files = selectPlanetFiles([wrong, row("gob", "2026-02-31", "2026-02-31")], now);
-  assert.deepEqual(files, { gol: { url: planetURL, date: null }, gob: { url: planetGobURL, date: null } });
+  assert.deepEqual(files, { gol: { url: planetURL, date: null }, gob: null });
   assert.equal(isPlanetFile(planetURL.replace("planet-latest", "../planet-latest"), "gol"), false);
 });

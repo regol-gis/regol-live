@@ -20,7 +20,7 @@ export function utcDate(value) {
 export function selectPlanetFiles(files, now = Date.now()) {
   const today = utcDate(now);
   const first = utcDate(now - 6 * 86400000);
-  const dates = { gol: new Map(), gob: new Map() };
+  const byURL = new Map();
   for (const file of files) {
     const format = file?.extension;
     if ((format !== "gol" && format !== "gob") || file.deprecated) continue;
@@ -30,18 +30,26 @@ export function selectPlanetFiles(files, now = Date.now()) {
     const dated = stamp && stamp.slice(1).join("-");
     const date = dated || utcDate(file.updated);
     if (!date || utcDate(date) !== date || date > today) continue;
-    const previous = dates[format].get(date);
-    if (!previous || (dated && !previous.dated)) dates[format].set(date, { url, date, dated: Boolean(dated) });
+    // A rolling URL can only serve its newest listing.
+    const previous = byURL.get(url);
+    if (!previous || date > previous.date) byURL.set(url, { url, date, dated: Boolean(dated), format });
+  }
+  const dates = { gol: new Map(), gob: new Map() };
+  for (const { format, ...file } of byURL.values()) {
+    const previous = dates[format].get(file.date);
+    if (!previous || (file.dated && !previous.dated)) dates[format].set(file.date, file);
   }
   const newest = format => [...dates[format].keys()].sort().reverse();
   const common = newest("gol").find(date => date >= first && dates.gob.has(date));
-  const pick = (format, url) => dates[format].get(common ?? newest(format)[0]) ?? { url, date: null };
-  return { gol: pick("gol", planetURL), gob: pick("gob", planetGobURL) };
+  return {
+    gol: dates.gol.get(common ?? newest("gol")[0]) ?? { url: planetURL, date: null },
+    gob: dates.gob.get(common) ?? null,
+  };
 }
 
 export async function discoverPlanetFiles() {
   try {
-    const response = await fetch(planetCatalogURL, { credentials: "omit", signal: AbortSignal.timeout(4000) });
+    const response = await fetch(planetCatalogURL, { credentials: "omit", cache: "no-cache", signal: AbortSignal.timeout(4000) });
     if (response.ok) return selectPlanetFiles((await response.json()).files);
   } catch {}
   return selectPlanetFiles([]);

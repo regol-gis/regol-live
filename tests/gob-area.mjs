@@ -28,12 +28,13 @@ export async function checkGobArea(browser, base) {
     await context.route(planetCatalogURL, route => route.fulfill({ json: { files: [
       record("gol", "latest"), record("gol", yesterday), record("gob", yesterday),
     ] } }));
-    for (const [url, file] of [[datedGob, gob], [datedGol, gol]]) {
+    const today = utcDate(Date.now());
+    for (const [url, file] of [[datedGob, gob], [datedGol, gol], [planetURL, gol], [planetGobURL, gob]]) {
       await context.route(url, async (route) => {
         const headers = {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Expose-Headers": "Content-Range, Content-Length, Last-Modified",
-          "Last-Modified": "Sun, 22 Nov 2026 00:00:00 GMT",
+          "Last-Modified": new Date(url === planetURL ? today : yesterday).toUTCString(),
           "Cache-Control": "no-store",
         };
         if (route.request().method() === "HEAD") {
@@ -203,8 +204,15 @@ export async function checkGobArea(browser, base) {
     await context.route(planetCatalogURL, route => route.fulfill({ json: { files: [
       record("gol", "latest"), record("gob", yesterday),
     ] } }));
+    await context.route(base + "/site-mode.js", route => route.fulfill({
+      contentType: "text/javascript",
+      body: 'export * from "./site-mode.js?defaults"; export const hostedPages = true;',
+    }));
+    await page.evaluate(() => localStorage.setItem("regol-live.intro-seen", "1"));
+    const beforeFallback = requests.length;
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.waitForFunction(() => document.getElementById("dataset-date").textContent.includes(" · GOB "));
+    const expected = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" }).format(new Date(today));
+    await page.waitForFunction(date => document.getElementById("dataset-date").textContent === date, expected);
     for (const width of [320, 375, 768]) {
       await page.setViewportSize({ width, height: 800 });
       const header = await page.locator(".top").boundingBox();
@@ -214,6 +222,14 @@ export async function checkGobArea(browser, base) {
           box.y + box.height <= header.y + header.height, `${id} fits in the header at ${width}px`);
       }
     }
+    await page.click("#download-area");
+    await page.click("#confirm-area");
+    await page.waitForFunction(() => document.getElementById("status").textContent.includes("Area ready"));
+    await run.click();
+    await finished();
+    assert.equal(await page.textContent("#dataset-date"), expected);
+    assert.equal(requests.slice(beforeFallback).filter(r => r.url.endsWith(".gob")).length, 0);
+    assert(requests.some(r => r.url === planetURL), "download and query use the selected GOL when the pair is unavailable");
   } finally {
     await context.close();
   }

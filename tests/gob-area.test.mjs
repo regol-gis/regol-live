@@ -128,6 +128,17 @@ test("GOB cancellation and snapshot changes preserve a previously completed stor
   assert(downloaded.plan(west).every(({ loaded }) => loaded));
 });
 
+test("rolling files that advanced past the catalog date cannot enter the selected pair", async (t) => {
+  const { engine, reads, reply } = fixture();
+  t.mock.method(globalThis, "fetch", (url, options) => url === planetURL
+    ? new Response(null, { headers: { "Last-Modified": modified, "Content-Length": "1024" } })
+    : reply(url, options));
+  const date = "2026-11-21";
+  await assert.rejects(GobArea.open(engine, () => {}, new AbortController().signal, planetGobURL, date), /date was selected/);
+  assert.deepEqual(reads, [[0, 63]], "no tiles read from a GOB with the wrong date");
+  await assert.rejects(new RangeFile(planetURL, () => {}).open(date), /date was selected/);
+});
+
 test("switching datasets discards the worker even with an area estimate in flight", (t) => {
   const original = globalThis.Worker;
   globalThis.Worker = class {
@@ -224,7 +235,7 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   await import("../web/worker.js");
   const request = { windows: [[-1, -1, 1, 1]] };
   const send = (id, type, publicPlanet = true, areaRequest = request) =>
-    globalThis.onmessage({ data: { id, type, publicPlanet, url: planetURL, request: areaRequest } });
+    globalThis.onmessage({ data: { id, type, publicPlanet, url: planetURL, gobURL: planetGobURL, request: areaRequest } });
   const next = (type, transport) => new Promise((resolve) => {
     receive = (message) => {
       if (message.type === type && message.transport === transport) resolve(message);

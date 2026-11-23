@@ -17,7 +17,9 @@ try {
   const page = await browser.newPage();
   await page.goto("http://127.0.0.1:" + server.address().port);
   const report = await page.evaluate(async () => {
-    const { planetURL } = await import("./ranges.js");
+    const { discoverPlanetFiles } = await import("./planet-files.js");
+    const { gol, gob } = await discoverPlanetFiles();
+    if (!gob) throw Error("The catalog has no same-date GOL and GOB for the benchmark.");
     const selectors = [
       "na[amenity=cafe]", "n[railway=station]", "a[leisure=park]", "r[route=bus][ref=24]",
       'r[route=subway][ref=Central][from="Ealing Broadway"][to=Loughton]',
@@ -36,7 +38,9 @@ try {
               clearTimeout(timer); reject(Error(data.message || data.type));
             }
           };
-          worker.postMessage({ id: reuse ? id : ++id, type, url: planetURL, request, publicPlanet: true, pauseAtTransferLimit: true });
+          worker.postMessage({ id: reuse ? id : ++id, type, url: gol.url, gobURL: gob.url, request,
+            golDate: gol.dated ? null : gol.date, gobDate: gob.dated ? null : gob.date,
+            publicPlanet: true, pauseAtTransferLimit: true });
         });
       }
       const queries = [];

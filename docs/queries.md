@@ -6,9 +6,9 @@ In standalone mode, you can pan, choose a dataset or edit a query before the fir
 
 When a query needs to read the remote GOL, choose **Download this area** to review the size, or **Run anyway** to continue the query. Select **Don’t show again** to skip future warnings in this browser. Named-area lookups search the planet and may need a live read even when the visible area is downloaded.
 
-The date next to **Dataset** is the planet publication date in UTC. Live checks the OpenPlanetData catalog for the newest day with both formats, counting today and the previous six UTC dates. If the catalog has no such pair, Live uses the newest available GOL and GOB and shows their dates separately when they differ. Reload the page to pick up a newly published pair.
+The date next to **Dataset** is the planet publication date in UTC. Live checks the OpenPlanetData catalog for the newest day with both formats, counting today and the previous six UTC dates. If there is no matching pair, Live uses one GOL for both area downloads and live queries. Reload the page to pick up a newly published pair.
 
-The browser keeps downloaded planet tiles and previously read GOL ranges available when you switch between them. A new area download uses compressed GOB tiles by default. If cached GOL metadata shows that fewer bytes are needed with the direct reader, the download reuses those GOL ranges instead.
+The browser keeps downloaded planet tiles and previously read GOL ranges available when you switch between them. When a matching GOB is available, a new area download uses its compressed tiles by default. If cached GOL metadata shows that fewer bytes are needed with the direct reader, the download reuses those GOL ranges instead.
 
 Beside **Results**, choose **GeoJSON**, **KML**, or **CSV (WKT)** and click **Export**. The download contains all matches in the current result list, including rows behind **Show more**, with WGS 84 geometries, typed OSM IDs and query set names. Overpass `out center;` exports points, and `out count;` produces a summary without feature rows. An explicitly shown `$geometry` is included as a separate feature. Partial downloads have `-partial` in the filename. GeoJSON and KML expose OSM attributes as `tag:<key>` fields. CSV stores geometry in `WKT` and all original tags in `tags_json`.
 

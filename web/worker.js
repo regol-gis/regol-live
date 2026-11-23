@@ -3,7 +3,7 @@ import {
   summarizeReadTimings,
   transferAllowance,
 } from "./ranges.js";
-import { isPlanetFile, planetGobURL } from "./planet-files.js";
+import { isPlanetFile, utcDate } from "./planet-files.js";
 import { ViewportReadAhead } from "./read-ahead.js";
 import { areaIndexFiles, hasNamedAreas } from "./named-areas.js";
 import { AreaDownload } from "./area-download.js";
@@ -112,7 +112,7 @@ function beforeGolNetwork(current) {
   return current.golDecision;
 }
 
-async function open(url, localFile) {
+async function open(url, localFile, expectedDate) {
   api = null;
   source?.cache?.close();
   ahead = new ViewportReadAhead();
@@ -222,7 +222,7 @@ async function open(url, localFile) {
   const areaFiles = areaIndexFiles(() => api.memory, url, () => job.areaIndex);
   // Complete the consent-gated open before starting the engine. Either failure
   // can then finish this job without leaving an orphaned read or dialog.
-  await source.open();
+  await source.open(expectedDate);
   api = await newEngine({
     get_page: getPage,
     suggestion_stopped: new WebAssembly.Suspending(checkSuggestion),
@@ -285,7 +285,7 @@ async function gobDownload(data, area) {
   let confirmed = false;
   try {
     if (!gobCatalog) {
-      const fresh = await GobArea.open(newGobEngine, (length, timing) => reportRead("gob", length, timing), signal, data.gobURL);
+      const fresh = await GobArea.open(newGobEngine, (length, timing) => reportRead("gob", length, timing), signal, data.gobURL, data.gobDate);
       if (gobActive?.snapshot !== fresh.snapshot) gobActive = null;
       gobCatalog = gobActive?.matchesArchive(fresh) ? gobActive : fresh;
     }
@@ -432,12 +432,15 @@ async function run(data, area, suggestion, signal) {
     }
     const publicPlanet = data.publicPlanet === true && isPlanetFile(data.url, "gol");
     if (publicPlanet) {
-      data.gobURL ??= planetGobURL;
-      if (!isPlanetFile(data.gobURL, "gob")) throw Error("Invalid planet archive URL.");
-      if ((gobCatalog?.url && gobCatalog.url !== data.gobURL) || (gobActive?.url && gobActive.url !== data.gobURL)) {
+      if (data.gobURL && !isPlanetFile(data.gobURL, "gob")) throw Error("Invalid planet archive URL.");
+      const outdated = archive => archive?.url && (archive.url !== data.gobURL ||
+        (data.gobDate && utcDate(archive.validator?.modified) !== data.gobDate));
+      if (outdated(gobCatalog) || outdated(gobActive)) {
         gobCatalog = gobActive = null;
         gobRetryAt = 0;
       }
+      if (api && source.url === data.url && data.golDate && utcDate(source.modified) !== data.golDate)
+        api = null;
     }
     const indexedAreas = !area && !data.locate && !suggestion &&
       hasNamedAreas(data.request);
@@ -448,7 +451,7 @@ async function run(data, area, suggestion, signal) {
       job.windows = [...data.request.windows, ...job.windows];
     const coveredByGol = downloadTransport === "gol" && api && source.url === data.url &&
       !source.invalidated && insideDownloadedArea(areaDownload?.downloadedWindows, job.windows);
-    if (publicPlanet && !suggestion && !coveredByGol) {
+    if (publicPlanet && data.gobURL && !suggestion && !coveredByGol) {
       if (area && (data.type === "plan-area" || performance.now() >= gobRetryAt)) {
         if (await gobDownload(data, area)) return;
       }
@@ -458,13 +461,11 @@ async function run(data, area, suggestion, signal) {
       }
     }
     if (job.downloadedOnly && !coveredByGol) return send({ type: "outside-download" });
-    // The two planet files can be published days apart. RangeFile validates
-    // its own GOL on network reads, independently of the active GOB archive.
     usingGol = true;
     if (!api || source.url !== data.url || source.invalidated) {
       if (area) area.opening = true;
       try {
-        await open(data.url, data.localFile === true);
+        await open(data.url, data.localFile === true, data.golDate);
       } finally {
         if (area) area.opening = false;
       }

@@ -1,5 +1,5 @@
 import { fetchByteRange, readBody } from "./ranges.js";
-import { planetGobURL } from "./planet-files.js";
+import { planetGobURL, utcDate } from "./planet-files.js";
 export { planetGobURL } from "./planet-files.js";
 
 const headerLength = 64;
@@ -72,9 +72,11 @@ export class GobArea {
   chunks = new Map();
   chunkBytes = 0;
 
-  static async open(engine, progress, signal, url = planetGobURL) {
+  static async open(engine, progress, signal, url = planetGobURL, expectedDate) {
     const area = new GobArea(engine, progress, url);
     const header = await area.read(0, headerLength, signal, 10000);
+    if (expectedDate && utcDate(area.validator.modified) !== expectedDate)
+      throw Error("The planet GOB has changed since the date was selected.");
     const view = new DataView(header.buffer);
     const prefixLength = 68 + 8 * view.getUint32(28, true) + view.getUint32(48, true);
     if (view.getUint32(0, true) !== 0xe0f6b060 || view.getUint32(4, true) !== 2 ||

@@ -199,6 +199,21 @@ export async function checkGobArea(browser, base) {
     await finished();
     assert(golReads() > after, "the opt-out survives a reload with a cold worker");
     await page.waitForFunction(() => document.getElementById("area-size").textContent.startsWith("0 MB / "));
+
+    await context.route(planetCatalogURL, route => route.fulfill({ json: { files: [
+      record("gol", "latest"), record("gob", yesterday),
+    ] } }));
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => document.getElementById("dataset-date").textContent.includes(" · GOB "));
+    for (const width of [320, 375, 768]) {
+      await page.setViewportSize({ width, height: 800 });
+      const header = await page.locator(".top").boundingBox();
+      for (const id of ["#dataset", "#dataset-date", "#open-about"]) {
+        const box = await page.locator(id).boundingBox();
+        assert(box.x >= 0 && box.x + box.width <= width && box.y >= header.y &&
+          box.y + box.height <= header.y + header.height, `${id} fits in the header at ${width}px`);
+      }
+    }
   } finally {
     await context.close();
   }

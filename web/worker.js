@@ -1,9 +1,11 @@
 import { CursorReader, cursorImports, rangeModule } from "./range-reader.js";
 import {
   RangeFile,
+  pageBytes,
   summarizeReadTimings,
   transferAllowance,
 } from "./ranges.js";
+import { engineJSON } from "./result-json.js";
 import { isPlanetFile, utcDate } from "./planet-files.js";
 import { ViewportReadAhead } from "./read-ahead.js";
 import { areaIndexFiles, hasNamedAreas } from "./named-areas.js";
@@ -16,7 +18,6 @@ let api, source, ahead, areaDownload, snapshot, stats, job, timings, transferErr
 let gobCatalog, gobActive, wasmModule;
 let downloadTransport;
 let gobRetryAt = 0;
-const utf8 = new TextDecoder();
 const encoder = new TextEncoder();
 
 function send(message) {
@@ -29,9 +30,8 @@ function send(message) {
   postMessage({ ...message, id: job.id });
 }
 
-function result(length) {
-  const bytes = new Uint8Array(api.memory.buffer, api.output_ptr(), length);
-  const value = JSON.parse(utf8.decode(bytes));
+function result(length, forDisplay = false) {
+  const value = engineJSON(api, length, forDisplay);
   if (value?.error) throw new Error(transferError || value.error);
   return value;
 }
@@ -63,9 +63,10 @@ function reportRead(transport, length, timing) {
   if (transport === "gol") ahead.observeRead(length, timing);
   stats.bytes += length;
   stats.gets++;
+  if (timing.concurrentReads) job.peakReads = Math.max(job.peakReads ?? 0, timing.concurrentReads);
   const now = performance.now();
   if (stats.gets === 1 || now - lastProgress >= 50) {
-    send({ type: "progress", transport, ...stats });
+    send({ type: "progress", transport, ...stats, peakReads: job.peakReads, queuedBlocks: job.cursors?.pending.size });
     lastProgress = now;
   }
 }
@@ -236,10 +237,19 @@ async function open(url, localFile, expectedDate) {
       }
     },
   );
-  const areaFiles = areaIndexFiles(() => api.memory, url, () => job.areaIndex);
   // Complete the consent-gated open before starting the engine. Either failure
   // can then finish this job without leaving an orphaned read or dialog.
-  await source.open(expectedDate);
+  const primePlanet = isPlanetFile(url, "gol") && !job.suggestion && !job.locate && !job.area;
+  await source.open(expectedDate, primePlanet && remaining() >= pageBytes);
+  const window = job.windows?.length === 1 ? job.windows[0] : null;
+  if (primePlanet && window) {
+    const [west, south, east, north] = window;
+    const width = east - west, height = north - south;
+    // Keep the inexpensive validated header overlap for every foreground
+    // query, but leave wide and split viewports to the ordinary demand path.
+    if (width > 0 && height > 0 && Math.max(width, height) <= 0.25)
+      await source.primePlanetMetadata(ahead, remaining());
+  }
   const scheduled = isPlanetFile(url, "gol");
   api = await newEngine({
     ...(scheduled && cursorImports(() => job.cursors, () => api)),
@@ -248,12 +258,13 @@ async function open(url, localFile, expectedDate) {
     fetch_area_file: new WebAssembly.Suspending(async (...args) => {
       const start = performance.now();
       try {
-        return await areaFiles.fetch_area_file(...args, job.signal);
+        job.areaFiles ??= areaIndexFiles(() => api.memory, url, () => job.areaIndex, job.areaNames);
+        return await job.areaFiles.fetch_area_file(...args, job.signal);
       } finally {
         job.pageMs += performance.now() - start;
       }
     }),
-    copy_area_file: areaFiles.copy_area_file,
+    copy_area_file: (...args) => job.areaFiles?.copy_area_file(...args) ?? 0,
   }, scheduled ? rangeModule() : undefined);
   // Without a validator, decoded geometry is reusable only within this open.
   snapshot = JSON.stringify([
@@ -309,9 +320,12 @@ async function gobDownload(data, area, coveredByGol) {
       gobCatalog = gobActive?.matchesArchive(fresh) ? gobActive : fresh;
     }
     const entries = gobCatalog.plan(job.windows);
-    const estimate = gobCatalog.estimate(entries);
+    let estimate = gobCatalog.estimate(entries);
     job.archiveTotal = estimate.total;
     if (coveredByGol) return false;
+    const cached = data.type === "plan-area" && !estimate.limitBytes
+      ? await gobCatalog.prepare(entries, signal) : undefined;
+    if (cached) estimate = gobCatalog.estimate(entries, cached);
     if ((estimate.missing || estimate.limitBytes) && api && source.url === data.url && !source.invalidated) {
       source.signal = signal;
       const warm = await golDownload(false).planFromCache(job.windows);
@@ -324,7 +338,7 @@ async function gobDownload(data, area, coveredByGol) {
     confirmed = await confirmArea(data, area, estimate, details);
     if (confirmed) {
       const before = stats.bytes;
-      const downloaded = await gobCatalog.download(entries, signal);
+      const downloaded = await gobCatalog.download(entries, signal, cached);
       signal.throwIfAborted();
       gobActive = gobCatalog = downloaded;
       gobActive.downloadedWindows = job.windows;
@@ -332,7 +346,6 @@ async function gobDownload(data, area, coveredByGol) {
       send({
         type: "area-ready", ...details, ...estimate, covered: entries.length > 0,
         bytes: stats.bytes - before,
-        wasmMemoryBytes: gobActive.api.memory.buffer.byteLength,
       });
     }
     gobRetryAt = 0;
@@ -371,8 +384,9 @@ async function gobQuery(start, request) {
   try {
     const entries = gobActive.plan(job.windows);
     if (entries.length && entries.every(({ tip, loaded }) => loaded || gobActive.chunks?.has(tip))) {
+      await gobActive.preload(entries, job.signal);
       const remaining = () => job.downloadedOnly ? 0 : job.limit - stats.bytes;
-      const { value, resultBytes, engineMs } = await gobActive.query(request, remaining, job.signal);
+      const { value, resultBytes, engineMs } = await gobActive.query(request, remaining, job.signal, job.resultJSON);
       job.engineMs = engineMs;
       sendResult(value, resultBytes, gobActive.snapshot, start, "gob");
       return true;
@@ -413,6 +427,8 @@ async function run(data, area, suggestion, signal) {
     nextYield: start + 16,
     area,
     areaIndex: data.areaIndex,
+    areaNames: (data.request.sets ?? []).map(set => set.overpass?.namedArea?.name).filter(name => typeof name === "string"),
+    resultJSON: data.resultJSON === true,
     downloadedOnly: data.downloadedOnly === true,
     warnLiveGol: !area && !suggestion && !data.downloadedOnly && data.warnLiveGol === true,
     suggestion,
@@ -559,7 +575,7 @@ async function run(data, area, suggestion, signal) {
     if (job.cursors?.error) throw job.cursors.error;
     if (source.invalidated) throw Error(transferError || "The dataset changed. Run the query again to reopen it.");
     if (job.missingPage) return send({ type: "outside-download" });
-    sendResult(result(resultBytes), resultBytes, snapshot, start);
+    sendResult(result(resultBytes, job.resultJSON), resultBytes, snapshot, start);
   } catch (error) {
     // An interrupted read does not invalidate the open dataset or its pinned tiles.
     if (!area && !suggestion && signal.aborted && !source?.invalidated && !(error instanceof WebAssembly.RuntimeError)) return;
@@ -578,6 +594,7 @@ async function run(data, area, suggestion, signal) {
   } finally {
     clearTimeout(timer);
     job.cursors = undefined;
+    job.areaFiles = undefined;
     if (pendingSuggestion === suggestion) pendingSuggestion = null;
     if (source) source.signal = undefined;
     if (pendingArea === area) pendingArea = null;

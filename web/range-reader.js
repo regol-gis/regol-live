@@ -1,5 +1,9 @@
 import { blockBytes } from "./range-cache.js";
 
+const MiB = 1024 * 1024;
+const maxEvictedBlocks = 4096;
+const repeatedBlocksForGrowth = 64;
+
 let compiled;
 export function rangeModule() {
   return compiled ??= WebAssembly.compileStreaming(fetch("./regol-live-range.wasm"))
@@ -31,6 +35,8 @@ export class CursorReader {
   active = new Set();
   lanes = new Map();
   controller = new AbortController();
+  readyLimit = 16 * MiB;
+  evictedReads = 0;
 
   constructor(source, ahead, signal, request, reserve, onWait) {
     this.source = source;
@@ -49,6 +55,16 @@ export class CursorReader {
     this.planning = this.warmOutput &&
       typeof set.source === "string" && set.source.includes("[");
     this.cap = this.planning ? 64 : 16;
+    const window = request.windows?.length === 1 && request.windows[0];
+    if (this.planning && window) {
+      const [west, south, east, north] = window;
+      if (east > west && north > south && Math.max(east - west, north - south) > 0.25) {
+        const memory = globalThis.navigator?.deviceMemory;
+        this.readyLimit = (memory >= 8 ? 64 : memory >= 4 ? 32 : 16) * MiB;
+        // Browsers without a memory hint can grow once they actually refetch evicted blocks.
+        if (!(memory > 0)) this.evicted = new Set();
+      }
+    }
   }
 
   begin(id) {
@@ -81,6 +97,10 @@ export class CursorReader {
     for (let p = start; p < start + length; p += blockBytes) {
       let block = this.blocks.get(p);
       if (!block) {
+        if (this.evicted?.delete(p) && ++this.evictedReads === repeatedBlocksForGrowth) {
+          this.readyLimit = 32 * MiB;
+          this.evicted = undefined;
+        }
         const resident = this.ahead.get(p, Math.min(blockBytes, this.source.size - p));
         if (resident) { parts.push(resident); continue; }
         block = Promise.withResolvers();
@@ -182,10 +202,15 @@ export class CursorReader {
         block.resolve(block.bytes);
         this.ready.add(p);
       }
-      while (this.ready.size * blockBytes > 16 * 1024 * 1024) {
+      while (this.ready.size * blockBytes > this.readyLimit) {
         const oldest = this.ready.values().next().value;
         this.ready.delete(oldest);
         this.blocks.delete(oldest);
+        if (this.evicted) {
+          this.evicted.add(oldest);
+          if (this.evicted.size > maxEvictedBlocks)
+            this.evicted.delete(this.evicted.values().next().value);
+        }
       }
     } catch (error) {
       if (!this.signal.aborted) this.error = error;
@@ -202,5 +227,10 @@ export class CursorReader {
   async close() {
     this.controller.abort();
     await Promise.allSettled([...this.active, ...this.lanes.values()]);
+    this.blocks.clear();
+    this.ready.clear();
+    this.pending.clear();
+    this.lanes.clear();
+    this.evicted?.clear();
   }
 }

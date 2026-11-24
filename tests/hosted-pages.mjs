@@ -69,6 +69,8 @@ export async function checkHostedPages(browser, base) {
     assert(await auto.isChecked());
     const outline = () => page.evaluate(() => testMap.getSource("downloaded-area").getData());
     const downloaded = await outline();
+    assert.equal(await page.evaluate(() => testMap.getStyle().layers.some(
+      layer => layer.source === "downloaded-area" && layer.type === "fill")), false);
     assert.equal(downloaded.geometry.type, "MultiLineString");
     assert(await page.locator("#downloaded-legend").isVisible());
     const bounds = await page.evaluate(() => testMap.getBounds().toArray());

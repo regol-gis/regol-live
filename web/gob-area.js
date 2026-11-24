@@ -1,4 +1,6 @@
+import { engineJSON } from "./result-json.js";
 import { maxAreaBytes } from "./area-download.js";
+import { GobTileCache, sha256 } from "./gob-tile-cache.js";
 import { TileCountLimit } from "./tile-catalog.js";
 import { fetchByteRange, readBody } from "./ranges.js";
 import { planetGobURL, utcDate } from "./planet-files.js";
@@ -10,7 +12,7 @@ const maxTiles = 256;
 const maxRangeBytes = 4 * 1024 * 1024;
 const maxConcurrentRanges = 8;
 const maxQueryDependencies = 64;
-const utf8 = new TextDecoder();
+const prefixCacheName = "regol-gob-prefix-length-v1";
 
 export const planetSnapshot = (tileset, revision) =>
   JSON.stringify(["planet", tileset, revision]);
@@ -32,9 +34,8 @@ export class GobQueryError extends Error {}
 
 class DecodedLimit extends GobQueryError {}
 
-function readOutput(api, length, ErrorType = Error) {
-  const bytes = new Uint8Array(api.memory.buffer, api.output_ptr(), length);
-  const value = JSON.parse(utf8.decode(bytes));
+function readOutput(api, length, ErrorType = Error, forDisplay = false) {
+  const value = engineJSON(api, length, forDisplay);
   if (value.decodedLimit) throw new DecodedLimit(value.error);
   if (value.error) throw new ErrorType(value.error);
   return value;
@@ -57,13 +58,14 @@ function importTile(api, tip, bytes) {
   if (error) readOutput(api, error);
 }
 
-function coalesce(entries) {
+function coalesce(entries, gap = 0) {
   const ranges = [];
   for (const entry of [...entries].sort((a, b) => a.offset - b.offset)) {
     const tail = ranges.at(-1);
-    if (tail && tail.offset + tail.length === entry.offset &&
-        tail.length + entry.length <= maxRangeBytes) {
-      tail.length += entry.length;
+    const end = entry.offset + entry.length;
+    if (tail && tail.offset + tail.length + gap >= entry.offset &&
+        end - tail.offset <= maxRangeBytes) {
+      tail.length = end - tail.offset;
       tail.entries.push(entry);
     } else {
       ranges.push({ offset: entry.offset, length: entry.length, entries: [entry] });
@@ -72,31 +74,64 @@ function coalesce(entries) {
   return ranges;
 }
 
+async function prefixHint(url, date) {
+  if (!date) return {};
+  try {
+    const cache = await globalThis.caches?.open(prefixCacheName);
+    const stored = await cache?.match(url);
+    const length = Number(stored?.headers.get("X-Regol-Prefix-Length"));
+    return {
+      cache,
+      length: stored?.headers.get("X-Regol-Snapshot-Date") === date &&
+        Number.isSafeInteger(length) && length >= 68 && length <= maxPrefixBytes
+        ? length : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 export class GobArea {
   chunks = new Map();
   chunkBytes = 0;
+  cacheAllowed = true;
 
   static async open(engine, progress, signal, url = planetGobURL, expectedDate) {
-    const area = new GobArea(engine, progress, url);
-    const header = await area.read(0, headerLength, signal, 10000);
+    const hints = await prefixHint(url, expectedDate);
+    signal.throwIfAborted();
+    let area = new GobArea(engine, progress, url);
+    let initial;
+    if (hints.length) {
+      try {
+        initial = await area.read(0, hints.length, signal, 10000);
+      } catch {
+        signal.throwIfAborted();
+        // A rolling archive can shrink or reject a previously valid range.
+        area = new GobArea(engine, progress, url);
+      }
+    }
+    initial ??= await area.read(0, headerLength, signal, 10000);
     if (expectedDate && utcDate(area.validator.modified) !== expectedDate)
       throw Error("The planet GOB has changed since the date was selected.");
-    const view = new DataView(header.buffer);
+    const view = new DataView(initial.buffer, initial.byteOffset, initial.byteLength);
     const prefixLength = 68 + 8 * view.getUint32(28, true) + view.getUint32(48, true);
     if (view.getUint32(0, true) !== 0xe0f6b060 || view.getUint32(4, true) !== 2 ||
         prefixLength > maxPrefixBytes)
       throw Error("The planet GOB catalog is unavailable or unsupported.");
-    const prefix = new Uint8Array(prefixLength);
-    prefix.set(header);
+    const prefix = initial.length >= prefixLength
+      ? initial.subarray(0, prefixLength) : new Uint8Array(prefixLength);
     const [rest, engineResult] = await Promise.allSettled([
-      area.read(headerLength, prefixLength - headerLength, signal, 10000),
+      initial.length < prefixLength && area.read(initial.length, prefixLength - initial.length, signal, 10000),
       engine(),
     ]);
     signal.throwIfAborted();
     if (rest.status === "rejected") throw rest.reason;
     if (engineResult.status === "rejected") throw engineResult.reason;
     const api = engineResult.value;
-    prefix.set(rest.value, headerLength);
+    if (rest.value) {
+      prefix.set(initial);
+      prefix.set(rest.value, initial.length);
+    }
     const { tileset, revision, size } = openPrefix(api, prefix);
     if (!Number.isSafeInteger(size) || size < prefixLength ||
         (area.size !== undefined && area.size !== size))
@@ -105,6 +140,29 @@ export class GobArea {
     area.prefix = prefix;
     area.api = api;
     area.snapshot = planetSnapshot(tileset, revision);
+    if (area.cacheAllowed && globalThis.crypto?.subtle) {
+      const { etag, modified } = area.validator;
+      const strong = /^"[^"]+"$/.test(etag);
+      if (strong || utcDate(modified)) {
+        try {
+          const identity = JSON.stringify([url, size, etag, modified, area.snapshot, await sha256(prefix)]);
+          area.tileCache = await GobTileCache.open(identity);
+          area.verifyStored = !strong;
+        } catch {
+          // A failed optional cache must not affect the normal opening path.
+        }
+      }
+    }
+    if (hints.cache && hints.length !== prefixLength) {
+      try {
+        await hints.cache.put(url, new Response(null, { headers: {
+          "X-Regol-Prefix-Length": String(prefixLength), "X-Regol-Snapshot-Date": expectedDate,
+        } }));
+      } catch {
+        // Storage is optional. Every open still validates the live archive.
+      }
+    }
+    signal.throwIfAborted();
     return area;
   }
 
@@ -125,6 +183,7 @@ export class GobArea {
     const end = offset + length - 1;
     const response = await fetchByteRange(this.url, offset, end, signal, timeout);
     const headersAt = performance.now();
+    if (/\bno-store\b/i.test(response.headers.get("Cache-Control") || "")) this.cacheAllowed = false;
     const etag = response.headers.get("ETag");
     const modified = response.headers.get("Last-Modified");
     const range = response.headers.get("Content-Range");
@@ -163,82 +222,164 @@ export class GobArea {
     return [...entries.values()];
   }
 
-  estimate(entries) {
+  estimate(entries, cached) {
     let missing = 0;
     let total = 0;
+    let retainedBytes = 0;
+    const hints = !this.invalidated && this.cacheAllowed ? this.tileCache : undefined;
     for (const { tip, length } of entries) {
       total += length;
-      if (!this.chunks.has(tip)) missing += length;
+      if (this.chunks.has(tip) || cached?.has(tip)) continue;
+      missing += length;
+      if (cached) hints?.forgetHint(tip);
+      else if (hints?.hasHint(tip, length)) retainedBytes += length;
     }
     if (total > maxAreaBytes)
       return { tiles: entries.length, total, missing: null, limitBytes: maxAreaBytes };
-    return { tiles: entries.length, missing, total };
+    return { tiles: entries.length, missing, total, ...(retainedBytes && { retainedBytes }) };
   }
 
-  async download(entries, signal) {
-    const estimate = this.estimate(entries);
-    if (estimate.limitBytes) throw Error("Select a smaller area before downloading.");
-    if (this.active && entries.every(({ tip }) => this.chunks.has(tip))) return this;
-    const chunks = new Map();
-    const missing = [];
-    for (const entry of entries) {
-      const previous = this.chunks.get(entry.tip);
-      if (previous) chunks.set(entry.tip, previous);
-      else missing.push(entry);
-    }
-    // Stage both the network reads and imports. Cancellation and failed
-    // transfers leave the engine used by the last completed download intact.
-    const reads = new AbortController();
-    const readSignal = AbortSignal.any([signal, reads.signal]);
-    const ranges = coalesce(missing);
-    let next = 0;
-    let failure;
-    const fetchRanges = async () => {
-      while (!readSignal.aborted && next < ranges.length) {
-        const range = ranges[next++];
-        try {
+  async prepare(entries, signal) {
+    if (!this.tileCache || !this.cacheAllowed) return;
+    const unknown = entries.filter(({ tip }) => !this.chunks.has(tip));
+    if (!unknown.length) return;
+    const cached = await this.tileCache.read(unknown, signal);
+    if (this.verifyStored && cached.size) {
+      const ranges = coalesce(unknown.filter(({ tip }) => cached.has(tip))
+        .map(entry => ({ ...entry, length: 8 })), 4096);
+      try {
+        await this.visitRanges(ranges, signal, async (range, readSignal) => {
           const bytes = await this.read(range.offset, range.length, readSignal);
           for (const entry of range.entries) {
-            const start = entry.offset - range.offset;
-            chunks.set(entry.tip, range.entries.length === 1
-              ? bytes
-              : bytes.slice(start, start + entry.length));
+            const offset = entry.offset - range.offset;
+            if (!bytes.subarray(offset, offset + 8).every((byte, i) => byte === cached.get(entry.tip)[i]))
+              cached.delete(entry.tip);
           }
+        });
+      } catch (error) {
+        signal.throwIfAborted();
+        if (this.invalidated) throw error;
+        cached.clear();
+      }
+    }
+    if (!this.cacheAllowed) cached.clear();
+    return cached;
+  }
+
+  async visitRanges(ranges, signal, visit) {
+    const reads = new AbortController();
+    const readSignal = AbortSignal.any([signal, reads.signal]);
+    let next = 0;
+    let failure;
+    const run = async () => {
+      while (!readSignal.aborted && next < ranges.length) {
+        try {
+          await visit(ranges[next++], readSignal);
         } catch (error) {
           failure ??= error;
           reads.abort();
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(ranges.length, maxConcurrentRanges) }, fetchRanges));
+    await Promise.all(Array.from({ length: Math.min(ranges.length, maxConcurrentRanges) }, run));
     signal.throwIfAborted();
     if (failure) throw failure;
-    const candidate = new GobArea(this.engine, this.progress, this.url);
-    const api = await this.engine();
-    signal.throwIfAborted();
-    openPrefix(api, this.prefix);
-    for (const { tip } of entries) {
-      signal.throwIfAborted();
-      try {
-        importTile(api, tip, chunks.get(tip));
-      } catch (error) {
-        if (!(error instanceof DecodedLimit)) throw error;
-        // All sealed chunks are local. A query can open a fresh working set
-        // from these bytes when its viewport needs different decoded tiles.
-        break;
-      }
-      // Let the worker process cancel-area while importing a large viewport.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  async download(entries, signal, cached) {
+    const estimate = this.estimate(entries, cached);
+    if (estimate.limitBytes) throw Error("Select a smaller area before downloading.");
+    if (this.active && entries.every(({ tip }) => this.chunks.has(tip))) return this;
+    const chunks = new Map();
+    const missing = [];
+    for (const entry of entries) {
+      const previous = this.chunks.get(entry.tip) ?? cached?.get(entry.tip);
+      if (previous) chunks.set(entry.tip, previous);
+      else missing.push(entry);
     }
-    signal.throwIfAborted();
+    // Stage both the network reads and imports. Cancellation and failed
+    // transfers leave the engine used by the last completed download intact.
+    const ordinal = new Map(entries.map(({ tip }, index) => [tip, index]));
+    const rank = range => Math.min(...range.entries.map(entry => ordinal.get(entry.tip)));
+    const ranges = coalesce(missing).sort((a, b) => rank(a) - rank(b));
+    const tickets = new Map(missing.map(({ tip }) => [tip, Promise.withResolvers()]));
+    const stop = new AbortController();
+    const requestSignal = AbortSignal.any([signal, stop.signal]);
+    let fetchFailure;
+    const fetched = this.visitRanges(ranges, requestSignal, async (range, readSignal) => {
+      const bytes = await this.read(range.offset, range.length, readSignal);
+      for (const entry of range.entries) {
+        const start = entry.offset - range.offset;
+        chunks.set(entry.tip, range.entries.length === 1 ? bytes : bytes.slice(start, start + entry.length));
+        tickets.get(entry.tip).resolve();
+      }
+    }).catch(error => {
+      fetchFailure = error;
+      for (const ticket of tickets.values()) ticket.resolve();
+    });
+    const candidate = new GobArea(this.engine, this.progress, this.url);
+    const lazy = Boolean(cached?.size && !missing.length);
+    const imported = [];
+    let api;
+    try {
+      api = await this.engine();
+      signal.throwIfAborted();
+      openPrefix(api, this.prefix);
+      for (const { tip } of lazy ? [] : entries) {
+        if (!chunks.has(tip)) {
+          await tickets.get(tip).promise;
+        }
+        signal.throwIfAborted();
+        if (fetchFailure) throw fetchFailure;
+        try {
+          const bytes = chunks.get(tip);
+          importTile(api, tip, bytes);
+          if (tickets.has(tip)) imported.push([tip, bytes]);
+        } catch (error) {
+          if (!(error instanceof DecodedLimit)) throw error;
+          // Finish collecting the compressed tiles. Queries can rebuild just
+          // the decoded working set they need from the validated archive.
+          break;
+        }
+        // Let the worker process cancel-area and completed reads between tiles.
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+      await fetched;
+      signal.throwIfAborted();
+      if (fetchFailure) throw fetchFailure;
+    } finally {
+      stop.abort();
+      await fetched;
+    }
+    if (this.tileCache && this.cacheAllowed && imported.length) {
+      await this.tileCache.put(imported, signal);
+      signal.throwIfAborted();
+    }
     Object.assign(candidate, {
       api, prefix: this.prefix, size: this.size, snapshot: this.snapshot, validator: this.validator,
+      tileCache: this.tileCache, cacheAllowed: this.cacheAllowed, verifyStored: this.verifyStored,
+      lazy,
       chunks, chunkBytes: entries.reduce((sum, { length }) => sum + length, 0), active: true,
     });
     return candidate;
   }
 
-  async query(request, remaining, signal) {
+  async preload(entries, signal) {
+    if (!this.lazy) return;
+    for (const { tip, loaded } of entries) {
+      if (loaded) continue;
+      signal.throwIfAborted();
+      try {
+        importTile(this.api, tip, this.chunks.get(tip));
+      } catch (error) {
+        if (error instanceof DecodedLimit) break;
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+  }
+
+  async query(request, remaining, signal, forDisplay = false) {
     const fetched = new Set();
     const attempted = new Set();
     let rebuilt = false;
@@ -249,7 +390,7 @@ export class GobArea {
       const resultBytes = await this.api.gob_query();
       engineMs += performance.now() - start;
       signal?.throwIfAborted();
-      const value = readOutput(this.api, resultBytes, GobQueryError);
+      const value = readOutput(this.api, resultBytes, GobQueryError, forDisplay);
       if (value.missingTile === undefined) return { value, resultBytes, engineMs };
       const tip = value.missingTile;
       if (attempted.has(tip)) throw Error("The query could not load a required planet tile.");

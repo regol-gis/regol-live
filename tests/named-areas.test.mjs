@@ -1,7 +1,7 @@
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { gzipSync } from "node:zlib";
-import { areaIndexFiles, hasNamedAreas, hostedPlanetIndexURL } from "../web/named-areas.js";
+import { areaIndexFiles, hasNamedAreas, hostedPlanetIndexURL, nameHash } from "../web/named-areas.js";
 import { planetURL } from "../web/ranges.js";
 
 const url = "https://data.example/snapshot.gol";
@@ -10,9 +10,9 @@ const decoder = new TextDecoder();
 const fetchOriginal = globalThis.fetch;
 afterEach(() => { globalThis.fetch = fetchOriginal; });
 
-function imports(index, source = url) {
+function imports(index, source = url, names) {
   const memory = new WebAssembly.Memory({ initial: 1 });
-  const files = areaIndexFiles(() => memory, source, () => index);
+  const files = areaIndexFiles(() => memory, source, () => index, names);
   return {
     fetch(path, limit, snapshot = "") {
       const bytes = encoder.encode(path);
@@ -112,4 +112,41 @@ test("only the hosted planet pairs old coordinate shards with a different open G
   for (const other of [imports(hostedPlanetIndexURL, url), imports(url + ".areas", planetURL)]) {
     assert.equal(JSON.parse(other.copy(await other.fetch("manifest.json", 4096, open))).snapshot, published);
   }
+});
+
+test("a partitioned index sends one small shard for an exact UTF-8 name and reuses it only within the query", async () => {
+  const snapshot = "v1-1234-abc123-10000", directory = snapshot + "-0123456789abcdef";
+  const calls = [];
+  const manifest = { version: 1, snapshot, shards: 256, storage: { format: "gzip", directory, partitionBits: 4 } };
+  globalThis.fetch = async href => {
+    calls.push(href.pathname);
+    return href.pathname.endsWith("/manifest.json") ? Response.json(manifest) : new Response(gzipSync("[]"));
+  };
+  const hex = id => id.toString(16).padStart(2, "0");
+  const run = async (names, name) => {
+    const files = imports(undefined, url, names);
+    const h = nameHash(name), shard = hex(h & 255);
+    for (let pass = 0; pass < 2; pass++) {
+      assert.equal(JSON.parse(files.copy(await files.fetch("manifest.json", 4096))).snapshot, snapshot);
+      assert.equal(files.copy(await files.fetch(snapshot + "/" + shard + ".json", 65536)), "[]");
+    }
+    return { shard, part: hex((h >>> 8) & 15) };
+  };
+  const {shard,part} = await run(["São Paulo", "São Paulo"], "São Paulo");
+  assert.deepEqual(calls, ["/snapshot.gol.areas/manifest.json", "/snapshot.gol.areas/" + directory + "/p4/" + shard + "/" + part + ".json.gz"]);
+  calls.length = 0;
+  assert.equal(nameHash("Monaco") & 255, nameHash("Parc Disneyland") & 255);
+  const joined = await run(["Monaco", "Parc Disneyland"], "Monaco");
+  assert.deepEqual(calls, ["/snapshot.gol.areas/manifest.json", "/snapshot.gol.areas/" + directory + "/" + joined.shard + ".json.gz"]);
+  calls.length = 0;
+  globalThis.fetch = async href => {
+    calls.push(href.pathname);
+    if (href.pathname.endsWith("/manifest.json")) return Response.json(manifest);
+    if (href.pathname.includes("/p4/")) return new Response(null, {status:404});
+    return new Response(gzipSync("[]"));
+  };
+  await run(["São Paulo"], "São Paulo");
+  assert.deepEqual(calls, ["/snapshot.gol.areas/manifest.json",
+    "/snapshot.gol.areas/" + directory + "/p4/" + shard + "/" + part + ".json.gz",
+    "/snapshot.gol.areas/" + directory + "/" + shard + ".json.gz"]);
 });

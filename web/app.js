@@ -209,15 +209,19 @@ function showAreaSize(estimate, hint = "Checking size…", retry = false) {
     // The paired archive gives nested views a comparable footprint even when
     // cached GOL pages are the cheaper transfer for one of them.
     const paired = estimate.archiveTotal != null;
-    const footprint = areaBytes(paired ? estimate.archiveTotal : estimate.total) + " " + (paired ? "GOB" : format);
-    const transfer = areaBytes(estimate.missing) + " to fetch" + (paired ? " via GOL" : "");
+    const footprint = areaBytes(paired ? estimate.archiveTotal : (estimate.pageBytesRequired ?? estimate.total)) + " " + (paired ? "GOB" : format);
+    const retained = estimate.retainedBytes ?? 0;
+    const remaining = areaBytes(Math.max(0, estimate.missing - retained));
+    const transfer = remaining + (retained ? " likely to fetch" : " to fetch") + (paired ? " via GOL" : "");
     const detail = estimate.limitBytes
       ? (paired ? format + " " : "") + "over " + units(estimate.limitBytes)
       : transfer;
     size = footprint + " · " + detail;
     title = estimate.limitBytes
       ? format + " download needs " + units(estimate.total) + ". Zoom in to fit the " + units(estimate.limitBytes) + " cache."
-      : footprint + " for this view. " + areaBytes(estimate.missing) + " to fetch using " + format + ".";
+      : footprint + " for this view. " + remaining +
+        (retained ? " likely to fetch using " : " to fetch using ") + format + "." +
+        (retained ? " Stored tiles are checked before download." : "");
   }
   $("area-size").textContent = size;
   button.title = title;
@@ -850,7 +854,9 @@ async function run(reason = "manual", approvedGol = false) {
         (data.transport === "gob" ? "Reading planet tiles · " : "Reading GOL · ") +
           data.gets +
           (data.gets === 1 ? " range · " : " ranges · ") +
-          units(data.bytes),
+          units(data.bytes) +
+          (data.peakReads > 1 ? " · peak of " + data.peakReads + " concurrent reads" : "") +
+          (data.queuedBlocks ? " · " + number.format(data.queuedBlocks) + (data.queuedBlocks === 1 ? " block queued" : " blocks queued") : ""),
       );
     setBusy(false);
     if (data.type === "outside-download") {

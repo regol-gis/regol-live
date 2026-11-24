@@ -32,6 +32,24 @@ async function readLimited(body, limit) {
   return { size, chunks };
 }
 
+// The low byte is the Rust v1 shard. Additional bits subdivide immutable
+// shards on static hosts while keeping each exact-name lookup to one GET.
+export function nameHash(name) {
+  let hash = 0x811c9dc5;
+  for (const byte of encoder.encode(name)) hash = Math.imul(hash ^ byte, 0x01000193);
+  return hash >>> 0;
+}
+
+function partitionFile(shard, bits, hashes) {
+  const id = parseInt(shard, 16);
+  const parts = new Set(hashes.filter(hash => (hash & 255) === id)
+    .map(hash => (hash >>> 8) & ((1 << bits) - 1)));
+  // An older reader or two names in different subdivisions can use the full shard.
+  if (parts.size !== 1) return shard + ".json.gz";
+  const [part] = parts;
+  return "p" + bits + "/" + shard + "/" + part.toString(16).padStart(2, "0") + ".json.gz";
+}
+
 function webManifest(bytes, openPlanetSnapshot) {
   let manifest;
   try {
@@ -51,34 +69,59 @@ function webManifest(bytes, openPlanetSnapshot) {
   // planet, bind these search windows to the open GOL for the duration of the query.
   // Rust still checks shard contents and applies the selection against live features.
   const queryManifest = openPlanetSnapshot ? { ...original, snapshot: openPlanetSnapshot } : original;
-  return { queryManifest, directory: storage.directory };
+  const bits = storage.partitionBits;
+  if (bits !== undefined && (!Number.isInteger(bits) || bits < 1 || bits > 8))
+    throw Error("Invalid named-area partition count");
+  return { queryManifest, directory: storage.directory, bits };
 }
 
 // The WASM query is suspended during fetch. It allocates a buffer of the
 // required size on resumption, then consumes these chunks before the next read.
-export function areaIndexFiles(memory, golURL, indexURL) {
+export function areaIndexFiles(memory, golURL, indexURL, names) {
+  const hashes = (names ?? []).map(nameHash);
+  // The scheduled engine can hydrate the same name in its planning and execution passes.
+  // This object belongs to one query. A subsequent query checks the manifest again.
+  const cache = new Map();
+  let cachedBytes = 0;
   let pending, storage;
   return {
     async fetch_area_file(pathPtr, pathSize, limit, snapshotPtr, snapshotSize, signal) {
       pending = undefined;
       const path = utf8.decode(new Uint8Array(memory().buffer, pathPtr >>> 0, pathSize));
       const isManifest = path === "manifest.json";
-      if (isManifest) storage = undefined;
       const index = indexURL();
       const openPlanetSnapshot = isManifest && isPlanetFile(golURL, "gol") && index === hostedPlanetIndexURL && snapshotSize
         ? utf8.decode(new Uint8Array(memory().buffer, snapshotPtr >>> 0, snapshotSize))
         : undefined;
+      const key = JSON.stringify([index, path, limit, openPlanetSnapshot]);
+      if (names && cache.has(key)) {
+        const hit = cache.get(key);
+        pending = hit.data;
+        if (isManifest) storage = hit.storage;
+        return pending.size;
+      }
+      if (isManifest) storage = undefined;
       const url = new URL(index ?? golURL);
+      const base = url.pathname.replace(/\/$/, "") + (index ? "/" : ".areas/");
       let filename = path;
+      let fallback;
       if (storage) {
         const [snapshot, shard] = path.split("/");
         if (snapshot !== storage.queryManifest.snapshot || !/^[0-9a-f]{2}\.json$/.test(shard)) return -1;
-        filename = storage.directory + "/" + shard + ".gz";
+        const file = storage.bits ? partitionFile(shard.slice(0, 2), storage.bits, hashes) : shard + ".gz";
+        filename = storage.directory + "/" + file;
+        if (file !== shard + ".gz") fallback = storage.directory + "/" + shard + ".gz";
       }
-      url.pathname = url.pathname.replace(/\/$/, "") + (index ? "/" : ".areas/") + filename;
+      url.pathname = base + filename;
       url.hash = "";
       try {
-        const response = await fetch(url, { cache: isManifest ? "no-cache" : "force-cache", signal });
+        const options = { cache: isManifest ? "no-cache" : "force-cache", signal };
+        let response = await fetch(url, options);
+        if (fallback && (response.status === 404 || response.status === 410)) {
+          await response.body?.cancel();
+          url.pathname = base + fallback;
+          response = await fetch(url, options);
+        }
         if (!response.ok) return -1;
         let data = await readLimited(response.body, limit);
         if (!data) return -2;
@@ -97,6 +140,10 @@ export function areaIndexFiles(memory, golURL, indexURL) {
           } else if (response.headers.get("Content-Encoding") !== "gzip") {
             return -1;
           }
+        }
+        if (names && cachedBytes + data.size <= 2 * 1024 * 1024) {
+          cache.set(key, { data, storage });
+          cachedBytes += data.size;
         }
         pending = data;
         return data.size;

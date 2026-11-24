@@ -17,7 +17,7 @@ export async function checkGobArea(browser, base) {
   const page = await context.newPage();
   try {
     const requests = [];
-    let golHeads = 0;
+    let golHeads = 0, allowTileStorage = false;
     const yesterday = utcDate(Date.now() - 86400000);
     const datedGol = planetURL.replace("latest", yesterday);
     const datedGob = planetGobURL.replace("latest", yesterday);
@@ -35,7 +35,7 @@ export async function checkGobArea(browser, base) {
           "Access-Control-Allow-Origin": "*",
           "Access-Control-Expose-Headers": "Content-Range, Content-Length, Last-Modified",
           "Last-Modified": new Date(url === planetURL ? today : yesterday).toUTCString(),
-          "Cache-Control": "no-store",
+          "Cache-Control": allowTileStorage && url === datedGob ? "private" : "no-store",
         };
         if (route.request().method() === "HEAD") {
           if (url === datedGol) golHeads++;
@@ -230,6 +230,46 @@ export async function checkGobArea(browser, base) {
     assert.equal(await page.textContent("#dataset-date"), expected);
     assert.equal(requests.slice(beforeFallback).filter(r => r.url.endsWith(".gob")).length, 0);
     assert(requests.some(r => r.url === planetURL), "download and query use the selected GOL when the pair is unavailable");
+
+    // The rolling archive exposes a date but no strong ETag. A new worker can
+    // restore a saved tile only after checking its seal against the live archive.
+    allowTileStorage = true;
+    const reopen = () => page.evaluate(async ([url, gobURL]) => {
+      const { RangeQueries } = await import("/query-backend.js");
+      const backend = new RangeQueries();
+      const request = { windows: [[-1,-1,1,1]], selector: "nwr" };
+      const call = (type, downloadedOnly = false) => new Promise((resolve, reject) => {
+        let plan;
+        backend.run({ type, url, gobURL, publicPlanet: true, request, downloadedOnly }, data => {
+          if (data.type === "progress") return;
+          if (data.type === "area-estimate" && type === "plan-area") {
+            plan = data;
+            return backend.confirmArea();
+          }
+          if (data.type === "error" || data.type === "area-fallback") return reject(Error(data.message ?? data.reason));
+          resolve({ data, plan });
+        }, reject);
+      });
+      try {
+        const hint = (await call("estimate-area")).data;
+        const { data: ready, plan } = await call("plan-area");
+        const result = (await call("query", true)).data;
+        return { hint, plan, ready, result };
+      } finally { backend.reset(); }
+    }, [datedGol, datedGob]);
+    const cold = await reopen();
+    assert.equal(cold.hint.retainedBytes, undefined);
+    assert.equal(cold.ready.bytes, length);
+    const restoreAt = requests.length;
+    const restored = await reopen();
+    assert.equal(restored.hint.retainedBytes, length);
+    assert.equal(restored.plan.missing, 0);
+    assert.equal(restored.ready.bytes, 0);
+    assert.equal(restored.ready.transport, "gob");
+    assert.equal(restored.result.gets, 0);
+    assert.deepEqual(restored.result.features, cold.result.features);
+    const archiveReads = requests.slice(restoreAt).filter(r => r.url === datedGob);
+    assert(archiveReads.some(r => r.end - r.start + 1 === 8), "restoring a weakly validated archive checks its tile seal");
   } finally {
     await context.close();
   }

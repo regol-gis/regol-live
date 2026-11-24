@@ -101,6 +101,52 @@ test("GOB plans from the compressed catalog and loads cross-tile dependencies wi
   assert(!downloaded.matchesArchive(fresh), "same-size, same-validator prefix changes prevent reuse");
 });
 
+test("a later reader loads the same checked GOB prefix in one request", async (t) => {
+  const { engine, reply, prefixLength, reads } = fixture();
+  t.mock.method(globalThis, "fetch", reply);
+  const previous = globalThis.caches;
+  const stored = new Map();
+  globalThis.caches = { open: async () => ({
+    match: async (url) => stored.get(url),
+    put: async (url, hint) => stored.set(url, hint),
+  }) };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.caches;
+    else globalThis.caches = previous;
+  });
+  const signal = new AbortController().signal;
+  const date = "2026-11-22";
+  const open = () => GobArea.open(engine, () => {}, signal, planetGobURL, date);
+  const first = await open();
+  assert.deepEqual(reads, [[0, 63], [64, prefixLength - 1]]);
+  reads.length = 0;
+  const repeat = await open();
+  assert.deepEqual(reads, [[0, prefixLength - 1]]);
+  assert(first.matchesArchive(repeat));
+
+  function hint(length, savedDate = date) {
+    stored.set(planetGobURL, new Response(null, { headers: {
+      "X-Regol-Prefix-Length": String(length), "X-Regol-Snapshot-Date": savedDate,
+    } }));
+    reads.length = 0;
+  }
+  hint(prefixLength - 10);
+  assert(first.matchesArchive(await open()));
+  assert.deepEqual(reads, [[0, prefixLength - 11], [prefixLength - 10, prefixLength - 1]]);
+  hint(prefixLength + 10);
+  assert(first.matchesArchive(await open()));
+  assert.deepEqual(reads, [[0, prefixLength + 9]]);
+  hint(prefixLength + 100);
+  assert(first.matchesArchive(await open()));
+  assert.deepEqual(reads, [[0, prefixLength + 99], [0, 63], [64, prefixLength - 1]]);
+  hint(prefixLength, "2026-11-21");
+  assert(first.matchesArchive(await open()));
+  assert.deepEqual(reads, [[0, 63], [64, prefixLength - 1]]);
+  hint(4 * 1024 * 1024 + 1);
+  assert(first.matchesArchive(await open()));
+  assert.deepEqual(reads, [[0, 63], [64, prefixLength - 1]]);
+});
+
 test("a download larger than the decoded working set remains usable without network", async (t) => {
   const { engine, reply, reads } = fixture(1);
   t.mock.method(globalThis, "fetch", reply);
@@ -163,7 +209,7 @@ test("GOB cancellation and snapshot changes preserve a previously completed stor
 
 test("rolling files that advanced past the catalog date cannot enter the selected pair", async (t) => {
   const { engine, reads, reply } = fixture();
-  t.mock.method(globalThis, "fetch", (url, options) => url === planetURL
+  t.mock.method(globalThis, "fetch", async (url, options) => url === planetURL
     ? new Response(null, { headers: { "Last-Modified": modified, "Content-Length": "1024" } })
     : reply(url, options));
   const date = "2026-11-21";
@@ -235,6 +281,8 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
       snapshot: archiveSnapshot,
       api: { memory: new Uint8Array(4096) },
       matchesArchive(other) { return this.snapshot === other.snapshot; },
+      async prepare() {},
+      async preload() {},
       plan(windows) { return [{ loaded: this.active && windows[0][0] < 0 }]; },
       estimate(entries) { return { tiles: 1, missing: entries[0].loaded ? 0 : 8, total: 8 }; },
       async download() {

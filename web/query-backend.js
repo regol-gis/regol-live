@@ -1,3 +1,5 @@
+import { decodeDisplayResult } from "./result-json.js";
+
 // Each transport reports results in the format consumed by DisplayCache.
 export class RangeQueries {
   id = 0;
@@ -19,7 +21,7 @@ export class RangeQueries {
     const worker = this.worker = new Worker(new URL("./worker.js", import.meta.url), {
       type: "module",
     });
-    worker.onmessage = ({ data }) => {
+    worker.onmessage = async ({ data }) => {
       if (this.worker !== worker) return;
       // An abandoned request can still discover that the snapshot changed.
       if (data.invalidated) this.snapshot = null;
@@ -31,7 +33,23 @@ export class RangeQueries {
         return;
       }
       if (data.id !== this.id || !this.foreground) return;
-      const { receive, estimateOnly } = this.foreground;
+      const { receive, estimateOnly, fail } = this.foreground;
+      if (data.resultJSON) {
+        const current = () => this.worker === worker && this.id === data.id && Boolean(this.foreground);
+        try {
+          const output = await decodeDisplayResult(data.resultJSON, current);
+          if (!current()) return;
+          delete data.resultJSON;
+          data = { ...output, ...data };
+        } catch (error) {
+          if (!current()) return;
+          this.foreground = null;
+          this.area = false;
+          fail(error.message);
+          this.startSuggestion();
+          return;
+        }
+      }
       if (["result", "view", "area-ready", "outside-download", "error"].includes(data.type) ||
           ((estimateOnly || data.limitBytes) && data.type === "area-estimate")) {
         this.foreground = null;
@@ -54,7 +72,7 @@ export class RangeQueries {
     const estimateOnly = message.type === "estimate-area";
     this.area = estimateOnly || message.type === "plan-area";
     this.foreground = { receive, fail, estimateOnly };
-    this.worker.postMessage({ ...message, id: ++this.id });
+    this.worker.postMessage({ ...message, resultJSON: !this.area && !message.locate, id: ++this.id });
   }
 
   suggest(message, signal) {

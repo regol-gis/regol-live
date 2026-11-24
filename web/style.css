@@ -751,6 +751,14 @@ details summary {
   height: 100%;
   background: var(--surface);
 }
+#downloaded-legend::before {
+  content: "";
+  display: inline-block;
+  width: 1.6em;
+  margin-right: 0.4em;
+  vertical-align: middle;
+  border-top: 3px dashed #17637a;
+}
 .map-status {
   display: flex;
   justify-content: space-between;

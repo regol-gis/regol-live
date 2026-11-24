@@ -44,7 +44,7 @@ export async function checkPanCache(browser, base) {
         /\b(ms|s) · /.test(document.querySelector("#status").textContent),
       );
     const sizeReady = () => page.waitForFunction(() =>
-      document.querySelector("#area-size").textContent.includes(" MB / "));
+      document.querySelector("#area-size").textContent.includes(" to fetch"));
     await sizeReady();
     assert.equal(await page.evaluate(() => window.queryRequests), 0);
     assert(await page.getByLabel("Update on pan").isChecked());

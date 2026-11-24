@@ -647,7 +647,7 @@ try {
   const areaButton = page.locator(".top #download-area");
   const confirmArea = page.locator("#confirm-area");
   const waitAreaSize = () => page.waitForFunction(() =>
-    document.querySelector("#area-size").textContent.includes(" MB / "));
+    document.querySelector("#area-size").textContent.includes(" to fetch"));
   await waitAreaSize();
   if (await areaButton.isEnabled()) {
     await areaButton.click();
@@ -655,12 +655,12 @@ try {
     await page.waitForFunction(() => document.querySelector("#status").textContent.startsWith("Area ready"));
   }
   assert(await areaButton.isDisabled());
-  assert.match(await page.textContent("#area-size"), /^0 MB \/ 0\.21 MB$/);
+  assert.match(await page.textContent("#area-size"), /^208 KiB GOL · 0 B to fetch$/);
   await page.evaluate(() => testMap.jumpTo({ center: [7.422, 43.739], zoom: 15 }));
   await waitAreaSize();
   assert(await areaButton.isEnabled(), "panning with automatic queries off finds additional tiles");
   const beforeDownload = await page.textContent("#area-size");
-  assert.match(beforeDownload, / MB \/ 1 MB$/);
+  assert.match(beforeDownload, /^976 KiB GOL · .* to fetch$/);
   await areaButton.click();
   await page.waitForFunction(() =>
     !document.querySelector("#confirm-area").hidden || !document.querySelector("#area-dialog").open);
@@ -672,7 +672,7 @@ try {
   await confirmArea.click();
   await page.waitForFunction(() => document.querySelector("#status").textContent.startsWith("Area ready"));
   assert(await areaButton.isDisabled());
-  assert.equal(await page.textContent("#area-size"), "0 MB / 1 MB");
+  assert.equal(await page.textContent("#area-size"), "976 KiB GOL · 0 B to fetch");
   await program("$cafes = n[amenity=cafe]\nshow($cafes)");
   assert((await count()) > 0);
   assert.match(await page.textContent("#status"), /Cached · 0 ranges/);

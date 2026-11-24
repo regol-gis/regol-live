@@ -276,7 +276,7 @@ export class ViewportReadAhead {
 
 // Assemble full pages from memory, IndexedDB and HTTP. Keep partial pages
 // private until every read succeeds, including the short page at EOF.
-export async function readPages(source, pages, memory) {
+export async function readPages(source, pages, memory, storedFirst = false) {
   const buffers = new Map();
   const offsets = [];
   for (const page of pages) {
@@ -284,10 +284,20 @@ export async function readPages(source, pages, memory) {
     buffers.set(page, new Uint8Array(length));
     for (let i = 0; i < length; i += blockBytes) offsets.push(page + i);
   }
-  await readBlocks(source, offsets, memory, (start, bytes) => {
+  const copy = (start, bytes) => {
     const page = Math.floor(start / pageBytes) * pageBytes;
     buffers.get(page).set(bytes, start - page);
-  });
+  };
+  if (storedFirst && source.cache?.known.size) {
+    // Stage estimated cache hits before writes from the download can evict them.
+    const cached = [], uncached = [];
+    for (const start of offsets)
+      (source.cache.known.has(start) ? cached : uncached).push(start);
+    await readBlocks(source, cached, memory, copy);
+    await readBlocks(source, uncached, memory, copy);
+  } else {
+    await readBlocks(source, offsets, memory, copy);
+  }
   return buffers;
 }
 

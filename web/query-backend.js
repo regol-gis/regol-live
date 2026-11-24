@@ -3,15 +3,28 @@ export class RangeQueries {
   id = 0;
   suggestionId = 0;
 
+  constructor(onDownloadChange) {
+    this.onDownloadChange = onDownloadChange;
+  }
+
+  setDownload(windows) {
+    this.hasDownload = Boolean(windows?.length);
+    if (JSON.stringify(this.downloadedWindows) === JSON.stringify(windows)) return;
+    this.downloadedWindows = windows;
+    this.onDownloadChange?.(windows);
+  }
+
   openWorker() {
     if (this.worker) return;
-    this.worker = new Worker(new URL("./worker.js", import.meta.url), {
+    const worker = this.worker = new Worker(new URL("./worker.js", import.meta.url), {
       type: "module",
     });
-    this.worker.onmessage = ({ data }) => {
+    worker.onmessage = ({ data }) => {
+      if (this.worker !== worker) return;
       // An abandoned request can still discover that the snapshot changed.
       if (data.invalidated) this.snapshot = null;
       else if (data.snapshot) this.snapshot = data.snapshot;
+      if ("downloadedWindows" in data) this.setDownload(data.downloadedWindows);
       if (typeof data.id === "string") {
         if (data.id !== this.suggestion?.id || data.type === "progress") return;
         this.suggestion.finish(data.type === "suggestions" ? data : null);
@@ -19,19 +32,18 @@ export class RangeQueries {
       }
       if (data.id !== this.id || !this.foreground) return;
       const { receive, estimateOnly } = this.foreground;
-      if (data.type === "area-ready") this.hasDownload = data.tiles > 0;
       if (["result", "view", "area-ready", "outside-download", "error"].includes(data.type) ||
-          (estimateOnly && data.type === "area-estimate")) {
+          ((estimateOnly || data.limitBytes) && data.type === "area-estimate")) {
         this.foreground = null;
         this.area = false;
       }
       receive(data);
       this.startSuggestion();
     };
-    this.worker.onerror = (event) => {
+    worker.onerror = (event) => {
+      if (this.worker !== worker) return;
       const fail = this.foreground?.fail;
-      this.area = false;
-      this.cancel();
+      this.reset();
       fail?.(event.message || "The query worker could not start.");
     };
   }
@@ -103,7 +115,7 @@ export class RangeQueries {
     this.worker?.terminate();
     this.worker = null;
     this.snapshot = null;
-    this.hasDownload = false;
+    this.setDownload(null);
     this.area = false;
     this.id++;
   }

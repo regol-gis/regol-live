@@ -1,10 +1,11 @@
+import { maxAreaBytes } from "./area-download.js";
+import { TileCountLimit } from "./tile-catalog.js";
 import { fetchByteRange, readBody } from "./ranges.js";
 import { planetGobURL, utcDate } from "./planet-files.js";
 export { planetGobURL } from "./planet-files.js";
 
 const headerLength = 64;
 const maxPrefixBytes = 4 * 1024 * 1024;
-const maxAreaBytes = 128 * 1024 * 1024;
 const maxTiles = 256;
 const maxRangeBytes = 4 * 1024 * 1024;
 const maxConcurrentRanges = 8;
@@ -29,9 +30,12 @@ export function golPlanetSnapshot(header) {
 
 export class GobQueryError extends Error {}
 
+class DecodedLimit extends GobQueryError {}
+
 function readOutput(api, length, ErrorType = Error) {
   const bytes = new Uint8Array(api.memory.buffer, api.output_ptr(), length);
   const value = JSON.parse(utf8.decode(bytes));
+  if (value.decodedLimit) throw new DecodedLimit(value.error);
   if (value.error) throw new ErrorType(value.error);
   return value;
 }
@@ -151,9 +155,10 @@ export class GobArea {
   plan(windows) {
     const entries = new Map();
     for (const window of windows) {
-      const { tiles } = readOutput(this.api, this.api.gob_plan(...window));
+      const { tiles, tileLimit } = readOutput(this.api, this.api.gob_plan(...window));
+      if (tileLimit) throw new TileCountLimit(tileLimit);
       for (const tile of tiles) entries.set(tile.tip, tile);
-      if (entries.size > maxTiles) throw Error("Zoom in to download fewer tiles.");
+      if (entries.size > maxTiles) throw new TileCountLimit(maxTiles);
     }
     return [...entries.values()];
   }
@@ -166,12 +171,14 @@ export class GobArea {
       if (!this.chunks.has(tip)) missing += length;
     }
     if (total > maxAreaBytes)
-      throw Error("This area exceeds the 128 MiB download cache. Zoom in to select fewer tiles.");
+      return { tiles: entries.length, total, missing: null, limitBytes: maxAreaBytes };
     return { tiles: entries.length, missing, total };
   }
 
   async download(entries, signal) {
-    if (this.active && entries.every(({ loaded }) => loaded)) return this;
+    const estimate = this.estimate(entries);
+    if (estimate.limitBytes) throw Error("Select a smaller area before downloading.");
+    if (this.active && entries.every(({ tip }) => this.chunks.has(tip))) return this;
     const chunks = new Map();
     const missing = [];
     for (const entry of entries) {
@@ -212,7 +219,14 @@ export class GobArea {
     openPrefix(api, this.prefix);
     for (const { tip } of entries) {
       signal.throwIfAborted();
-      importTile(api, tip, chunks.get(tip));
+      try {
+        importTile(api, tip, chunks.get(tip));
+      } catch (error) {
+        if (!(error instanceof DecodedLimit)) throw error;
+        // All sealed chunks are local. A query can open a fresh working set
+        // from these bytes when its viewport needs different decoded tiles.
+        break;
+      }
       // Let the worker process cancel-area while importing a large viewport.
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
@@ -225,7 +239,9 @@ export class GobArea {
   }
 
   async query(request, remaining, signal) {
+    const fetched = new Set();
     const attempted = new Set();
+    let rebuilt = false;
     let engineMs = 0;
     for (;;) {
       writeInput(this.api, this.api.input_buffer, request);
@@ -236,16 +252,34 @@ export class GobArea {
       const value = readOutput(this.api, resultBytes, GobQueryError);
       if (value.missingTile === undefined) return { value, resultBytes, engineMs };
       const tip = value.missingTile;
-      if (attempted.has(tip) || attempted.size >= maxQueryDependencies)
-        throw Error("The query needs too many additional planet tiles.");
+      if (attempted.has(tip)) throw Error("The query could not load a required planet tile.");
       attempted.add(tip);
-      const { loaded, offset, length } = readOutput(this.api, this.api.gob_entry(tip));
-      if (loaded || length > remaining() || this.chunkBytes + length > maxAreaBytes)
-        throw Error("The query needs more planet tiles than the browser can load.");
-      const bytes = await this.read(offset, length, signal);
-      importTile(this.api, tip, bytes);
-      this.chunks.set(tip, bytes);
-      this.chunkBytes += length;
+      let bytes = this.chunks.get(tip);
+      if (!bytes) {
+        const { length, offset } = readOutput(this.api, this.api.gob_entry(tip));
+        if (fetched.size >= maxQueryDependencies || length > remaining() || this.chunkBytes + length > maxAreaBytes)
+          throw Error("The query needs more planet tiles than the browser can load.");
+        bytes = await this.read(offset, length, signal);
+        fetched.add(tip);
+        this.chunks.set(tip, bytes);
+        this.chunkBytes += length;
+      }
+      try {
+        importTile(this.api, tip, bytes);
+      } catch (error) {
+        if (!(error instanceof DecodedLimit)) {
+          this.chunks.delete(tip);
+          this.chunkBytes -= bytes.length;
+          throw error;
+        }
+        if (rebuilt) throw error;
+        // Drop decoded tiles from other views. Replaying this query can now
+        // use its own working set, including dependencies fetched above.
+        signal?.throwIfAborted();
+        openPrefix(this.api, this.prefix);
+        attempted.clear();
+        rebuilt = true;
+      }
     }
   }
 }

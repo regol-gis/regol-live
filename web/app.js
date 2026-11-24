@@ -22,6 +22,7 @@ import {
   queryWindows,
   mapFile,
   showGeometry,
+  showDownloadedArea,
   showResults,
   drawingCursor,
   setColor,
@@ -29,7 +30,10 @@ import {
 
 const $ = (id) => document.getElementById(id);
 const native = localDatasets.find((item) => item.native);
-const backend = native ? new NativeQueries() : new RangeQueries();
+const backend = native ? new NativeQueries() : new RangeQueries(windows => {
+  showDownloadedArea(windows);
+  $("downloaded-legend").hidden = !windows?.length;
+});
 const downloadGatesPan = hostedPages && !native;
 if (native) {
   $("about-standalone").hidden = true;
@@ -186,9 +190,8 @@ try { skipGolWarning = localStorage.getItem(golWarningKey) === "1"; } catch {}
 const drafts = { regol: examples.get("Cafés"), overpass: overpassExamples.get("Cafés") };
 let areaEstimate = null, areaTimer, checkingArea = false;
 let panPreferred = $("auto").checked, pendingPan = false;
-const decimalMB = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
-const megabytes = (bytes) =>
-  (bytes > 0 && bytes < 10000 ? "<0.01" : decimalMB.format(bytes / 1_000_000)) + " MB";
+const areaBytes = bytes => bytes ? units(bytes) : "0 B";
+const areaFormat = estimate => estimate.transport === "gob" ? "GOB" : "GOL";
 
 function showAreaSize(estimate, hint = "Checking size…", retry = false) {
   areaEstimate = estimate;
@@ -199,14 +202,28 @@ function showAreaSize(estimate, hint = "Checking size…", retry = false) {
       "Download this area to enable updates on pan";
   }
   const button = $("download-area");
-  const size = estimate ? megabytes(estimate.missing) + " / " + megabytes(estimate.total) : hint;
+  let size = hint;
+  let title = hint;
+  if (estimate) {
+    const format = areaFormat(estimate);
+    // The paired archive gives nested views a comparable footprint even when
+    // cached GOL pages are the cheaper transfer for one of them.
+    const paired = estimate.archiveTotal != null;
+    const footprint = areaBytes(paired ? estimate.archiveTotal : estimate.total) + " " + (paired ? "GOB" : format);
+    const transfer = areaBytes(estimate.missing) + " to fetch" + (paired ? " via GOL" : "");
+    const detail = estimate.limitBytes
+      ? (paired ? format + " " : "") + "over " + units(estimate.limitBytes)
+      : transfer;
+    size = footprint + " · " + detail;
+    title = estimate.limitBytes
+      ? format + " download needs " + units(estimate.total) + ". Zoom in to fit the " + units(estimate.limitBytes) + " cache."
+      : footprint + " for this view. " + areaBytes(estimate.missing) + " to fetch using " + format + ".";
+  }
   $("area-size").textContent = size;
-  button.title = estimate
-    ? megabytes(estimate.missing) + " remaining of " + megabytes(estimate.total)
-    : hint;
-  button.setAttribute("aria-label", "Download this area. " + button.title);
-  button.disabled = !ready || busy || !(estimate ? estimate.missing > 0 ||
-    (downloadGatesPan && estimate.tiles > 0 && !estimate.covered) : retry);
+  button.title = title;
+  button.setAttribute("aria-label", "Download this area. " + title);
+  button.disabled = !ready || busy || !(estimate ? !estimate.limitBytes && (estimate.missing > 0 ||
+    (downloadGatesPan && estimate.tiles > 0 && !estimate.covered)) : retry);
 }
 
 function cancelAreaCheck(reuseSource) {
@@ -233,9 +250,9 @@ function scheduleAreaCheck(clear = false) {
   // coverage when we check the settled viewport.
   areaTimer = setTimeout(() => {
     checkingArea = true;
-    const fail = (message) => {
+    const fail = (message, tileLimit = false) => {
       checkingArea = false;
-      showAreaSize(null, "Size unavailable", true);
+      showAreaSize(null, tileLimit ? "Zoom in · too many tiles" : "Size unavailable", !tileLimit);
       $("download-area").title = message;
     };
     backend.run({
@@ -245,7 +262,7 @@ function scheduleAreaCheck(clear = false) {
     }, (data) => {
       if (data.type === "error") {
         if (data.invalidated) resetDisplay();
-        fail(data.message);
+        fail(data.message, data.tileLimit);
       } else if (data.type === "area-estimate") {
         checkingArea = false;
         observeDate(url, data);
@@ -966,7 +983,8 @@ function downloadArea() {
   let fetching = false;
   let discoveryBytes = 0;
   let planned;
-  let usingFallback = false;
+  let fallbackReason;
+  const windows = areaEstimate?.windows ?? queryWindows();
   setBusy(true, url);
   confirm.hidden = true;
   message.textContent = "Reading the tile directory and headers…";
@@ -985,7 +1003,7 @@ function downloadArea() {
   backend.run({
     type: "plan-area", url, localFile: localSource()?.localFile === true,
     ...planetOptions(),
-    request: { windows: queryWindows() },
+    request: { windows },
   }, (data) => {
     if (current !== generation) return;
     observeDate(url, data);
@@ -995,7 +1013,7 @@ function downloadArea() {
       setBusy(false);
       status("Area download failed. " + data.message, true);
     } else if (data.type === "area-fallback") {
-      usingFallback = true;
+      fallbackReason = data.reason;
       fetching = false;
       message.textContent = "Checking the size of the GOL download…";
     } else if (data.type === "area-estimate") {
@@ -1003,9 +1021,16 @@ function downloadArea() {
       planned = data;
       showAreaSize(data);
       const tiles = data.tiles === 1 ? "1 tile" : data.tiles + " tiles";
-      message.textContent = (usingFallback ? "The tile archive is unavailable. " : "") +
-        tiles + " cover this view. " +
-        (data.missing ? "Estimated download " + units(data.missing) + "." : "All required bytes are cached.") +
+      const format = areaFormat(data);
+      const fallback = fallbackReason ? "The GOB could not be used. " + fallbackReason + " " : "";
+      if (data.limitBytes) {
+        message.textContent = fallback + tiles + " need " + units(data.total) + " of " + format +
+          " data. Zoom in to fit the " + units(data.limitBytes) + " download cache.";
+        confirm.hidden = true;
+        return;
+      }
+      message.textContent = fallback + tiles + " cover this view (" + units(data.total) + " " + format + "). " +
+        (data.missing ? areaBytes(data.missing) + " to fetch." : "All required bytes are cached.") +
         " Queries may fetch more data for features that extend outside the area.";
       confirm.textContent = data.missing ? "Download " + units(data.missing) : "Use cached tiles";
       confirm.hidden = false;
@@ -1186,10 +1211,11 @@ $("dataset").onchange = changedSource;
 $("url").oninput = () => {
   completion.close();
   showDatasetDate();
-  if (locatingURL) {
-    stop();
+  if (busy) {
+    stop({ keepDownload: false });
     status("Run the query to open this URL.");
   }
+  backend.reset?.();
   scheduleAreaCheck(true);
 };
 $("run").onclick = () => run();

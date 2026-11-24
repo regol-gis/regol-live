@@ -1,5 +1,5 @@
 import { htmlMap, svgMap } from "./export-map.js";
-import { windows } from "./viewport.js";
+import { downloadOutline, windows } from "./viewport.js";
 import { isBuilding, matchBuildingVolumes } from "./building-volumes.js";
 
 const initialPitch = 0;
@@ -49,6 +49,7 @@ const overlays = [
 const empty = () => ({ type: "FeatureCollection", features: [] });
 const layers = ["match-point", "match-line", "match-outline", "match-fill"];
 const sourceData = new Map([
+  ["downloaded-area", empty()],
   ["reference", empty()],
   ["selected", empty()],
 ]);
@@ -266,6 +267,10 @@ export function initMap({
       );
       volumesDirty = buildings.size > 0;
     }
+    for (const [id, paint] of [
+      ["downloaded-halo", { "line-color": "#ffffff", "line-width": 5, "line-opacity": 0.85 }],
+      ["downloaded-outline", { "line-color": "#17637a", "line-width": 3, "line-dasharray": [3, 2] }],
+    ]) map.addLayer({ id, source: "downloaded-area", type: "line", paint });
     overlays.forEach(drawLayers);
     onReady();
   });
@@ -346,6 +351,9 @@ export function showResults(next) {
 export function showGeometry(key, geometry) {
   set(key, geometry ? { type: "Feature", properties: {}, geometry } : empty());
 }
+export function showDownloadedArea(bounds) {
+  showGeometry("downloaded-area", downloadOutline(bounds));
+}
 export function queryWindows() {
   const b = map.getBounds();
   return windows(b.getWest(), b.getSouth(), b.getEast(), b.getNorth());
@@ -376,6 +384,9 @@ export function mapFile(format, name) {
       features: Array.from(matches.values(), mapFeature),
     };
     for (const [key, data] of sourceData) style.sources[key].data = data;
+    // The download belongs to this tab. Export just the query and reference layers.
+    style.layers = style.layers.filter(layer => layer.source !== "downloaded-area");
+    delete style.sources["downloaded-area"];
     return htmlMap({ style, camera }, name);
   }
   return svgMap(

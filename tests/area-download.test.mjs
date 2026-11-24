@@ -116,3 +116,20 @@ test("invalid extents and interrupted downloads preserve the last complete area"
   await assert.rejects(plan().plan(wrapped));
   assert.equal(ahead.pinned, previous);
 });
+
+test("an oversized GOL plan counts the complete union without touching tile bodies or pinned pages", async () => {
+  const { plan, source, starts, set, ahead, network } = fixture();
+  const area = plan();
+  await area.plan([wrapped[1]]);
+  await area.download();
+  const previous = ahead.pinned;
+  source.size = 320 * 2 ** 20;
+  set(starts[2], 300 * 2 ** 20 - 4);
+  network.length = 0;
+  const estimate = await area.plan(wrapped);
+  assert.equal(estimate.limitBytes, 256 * 2 ** 20);
+  assert.equal(estimate.total, 300 * 2 ** 20 + 3 * pageBytes);
+  assert.deepEqual(network, [[starts[2], blockBytes]]);
+  await assert.rejects(area.download(), /smaller area/);
+  assert.equal(ahead.pinned, previous);
+});

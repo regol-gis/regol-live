@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { insideDownloadedArea, windows } from "../web/viewport.js";
+import { downloadOutline, insideDownloadedArea, windows } from "../web/viewport.js";
 import { RangeFile, readBody } from "../web/ranges.js";
 
 test("wrapped and whole-world views remain within valid GOL query bounds", () => {
@@ -43,4 +43,13 @@ test("automatic queries require every viewport segment to fit the confirmed down
   assert(!insideDownloadedArea(download, [[175,-2,180,2],[-180,-2,-169,2]]));
   assert(!insideDownloadedArea(download, [[0,-2,1,2]]));
   assert(!insideDownloadedArea(undefined, download));
+});
+
+test("the downloaded outline stays on the two sides of a wrapped view", () => {
+  const shape = downloadOutline(windows(170, -5, 190, 5));
+  assert.deepEqual(shape.coordinates, [
+    [[180,5],[170,5],[170,-5],[180,-5]],
+    [[-180,-5],[-170,-5],[-170,5],[-180,5]],
+  ]);
+  assert.equal(downloadOutline(null), null);
 });

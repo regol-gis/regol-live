@@ -56,7 +56,7 @@ export async function checkHostedPages(browser, base) {
     await page.click("#run");
     const finished = () => page.waitForFunction(() => /\b(ms|s) · /.test(document.getElementById("status").textContent));
     await finished();
-    const sizeReady = () => page.waitForFunction(() => document.getElementById("area-size").textContent.includes(" MB / "));
+    const sizeReady = () => page.waitForFunction(() => document.getElementById("area-size").textContent.includes(" to fetch"));
     await sizeReady();
     const center = await page.evaluate(() => testMap.getCenter().toArray());
     const pan = (center, zoom) => page.evaluate(([center, zoom]) => testMap.jumpTo({ center, zoom }), [center, zoom]);
@@ -67,6 +67,14 @@ export async function checkHostedPages(browser, base) {
     await page.click("#confirm-area");
     await page.waitForFunction(() => !document.getElementById("auto").disabled);
     assert(await auto.isChecked());
+    const outline = () => page.evaluate(() => testMap.getSource("downloaded-area").getData());
+    const downloaded = await outline();
+    assert.equal(downloaded.geometry.type, "MultiLineString");
+    assert(await page.locator("#downloaded-legend").isVisible());
+    const bounds = await page.evaluate(() => testMap.getBounds().toArray());
+    const ring = downloaded.geometry.coordinates[0];
+    for (const [corner, expected] of [[ring[0], bounds[0]], [ring[2], bounds[1]]])
+      assert(corner.every((value, i) => Math.abs(value - expected[i]) < 1e-9));
     await pan(center, 16);
     await page.waitForFunction(() => queries.includes(true));
     await finished();
@@ -91,11 +99,16 @@ export async function checkHostedPages(browser, base) {
       assert.match(await page.textContent("#status"), /Cached · 0 ranges/);
     }
     assert.deepEqual(transfers, []);
+    assert.deepEqual(await outline(), downloaded);
     const before = await page.evaluate(() => queries.length);
     await pan([7.49, 43.77], 16);
     await sizeReady();
     assert(await auto.isDisabled());
     assert.equal(await page.evaluate(() => queries.length), before);
+    assert.deepEqual(await outline(), downloaded);
+    await page.click("#download-area");
+    await page.keyboard.press("Escape");
+    assert.deepEqual(await outline(), downloaded);
     await page.click("#run");
     await finished();
     assert.equal(await page.evaluate(() => queries.at(-1)), false);
@@ -108,6 +121,9 @@ export async function checkHostedPages(browser, base) {
     await pan(center, 16);
     await sizeReady();
     assert(!(await auto.isChecked()));
+    await page.selectOption("#dataset", "custom");
+    assert(!(await page.locator("#downloaded-legend").isVisible()));
+    assert.deepEqual((await outline()).features, []);
   } finally {
     await context.close();
   }

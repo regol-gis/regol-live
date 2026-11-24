@@ -199,7 +199,7 @@ export async function checkGobArea(browser, base) {
     await run.click();
     await finished();
     assert(golReads() > after, "the opt-out survives a reload with a cold worker");
-    await page.waitForFunction(() => document.getElementById("area-size").textContent.startsWith("0 MB / "));
+    await page.waitForFunction(() => document.getElementById("area-size").textContent.includes("0 B to fetch"));
 
     await context.route(planetCatalogURL, route => route.fulfill({ json: { files: [
       record("gol", "latest"), record("gob", yesterday),

@@ -21,3 +21,16 @@ export function windows(west, south, east, north) {
         [-180, south, end - 360, north],
       ];
 }
+
+// Wrapped selections have two query boxes but no border at the date line.
+export function downloadOutline(bounds) {
+  if (!bounds?.length) return null;
+  const wrapped = bounds.length === 2 && bounds[0][2] === 180 && bounds[1][0] === -180;
+  const coordinates = bounds.map(([w, s, e, n], i) => {
+    if (wrapped) return i === 0
+      ? [[e, n], [w, n], [w, s], [e, s]]
+      : [[w, s], [e, s], [e, n], [w, n]];
+    return [[w, s], [e, s], [e, n], [w, n], [w, s]];
+  });
+  return { type: "MultiLineString", coordinates };
+}

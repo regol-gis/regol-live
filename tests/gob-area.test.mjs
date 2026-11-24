@@ -13,7 +13,7 @@ const tileset = "5582b71fd24a428bac7a15bb9d82e91c";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-function fixture() {
+function fixture(decodedTiles = Infinity) {
   const prefixLength = 68 + 3 * 8 + 8;
   const file = new Uint8Array(prefixLength + 24);
   const header = new DataView(file.buffer);
@@ -48,6 +48,7 @@ function fixture() {
       gob_input_buffer: allocate,
       input_buffer: allocate,
       gob_open() {
+        loaded.clear();
         assert.deepEqual(memory.slice(1, 1 + inputLength), file.slice(0, prefixLength));
         return output({ tileset, revision: 124410, size: file.length });
       },
@@ -55,6 +56,7 @@ function fixture() {
       gob_import(tip) {
         assert.equal(inputLength, entry(tip).length);
         assert(!loaded.has(tip));
+        if (loaded.size >= decodedTiles) return output({ error: "Decoded tile limit", decodedLimit: true });
         loaded.add(tip);
         return 0;
       },
@@ -62,8 +64,9 @@ function fixture() {
       gob_query() {
         const { dependency, invalid } = JSON.parse(decoder.decode(memory.subarray(1, 1 + inputLength)));
         if (invalid) return output({ error: "Invalid selector" });
-        return dependency && !loaded.has(dependency)
-          ? output({ missingTile: dependency })
+        const missing = [dependency].flat().find(tip => tip && !loaded.has(tip));
+        return missing
+          ? output({ missingTile: missing })
           : output({ features: [] });
       },
     };
@@ -96,6 +99,36 @@ test("GOB plans from the compressed catalog and loads cross-tile dependencies wi
   assert(downloaded.matchesArchive(fresh));
   fresh.prefix[68] ^= 1;
   assert(!downloaded.matchesArchive(fresh), "same-size, same-validator prefix changes prevent reuse");
+});
+
+test("a download larger than the decoded working set remains usable without network", async (t) => {
+  const { engine, reply, reads } = fixture(1);
+  t.mock.method(globalThis, "fetch", reply);
+  const signal = new AbortController().signal;
+  const catalog = await GobArea.open(engine, () => {}, signal);
+  const both = catalog.plan([...west, ...east]);
+  const saved = await catalog.download(both, signal);
+  const gets = reads.length;
+  assert.equal(saved.estimate(saved.plan([...west, ...east])).missing, 0);
+  const query = dependency => saved.query(encoder.encode(JSON.stringify({ dependency })), () => 0, signal);
+  for (const tip of [1, 2, 3]) assert.deepEqual((await query(tip)).value.features, []);
+  await assert.rejects(query([1, 2]), /Decoded tile limit/);
+  assert.deepEqual((await query(3)).value.features, []);
+  assert.equal(reads.length, gets);
+});
+
+test("oversize GOB estimates report the full archive footprint and suppress body reads", async (t) => {
+  const { engine, reply, reads } = fixture();
+  t.mock.method(globalThis, "fetch", reply);
+  const signal = new AbortController().signal;
+  const catalog = await GobArea.open(engine, () => {}, signal);
+  const entries = [140, 120].map((mib, tip) => ({ tip, length: mib * 2 ** 20 }));
+  const estimate = catalog.estimate(entries);
+  assert.equal(estimate.total, 260 * 2 ** 20);
+  assert.equal(estimate.limitBytes, 256 * 2 ** 20);
+  const count = reads.length;
+  await assert.rejects(catalog.download(entries, signal), /smaller area/);
+  assert.equal(reads.length, count);
 });
 
 test("GOB cancellation and snapshot changes preserve a previously completed store", async (t) => {
@@ -261,6 +294,8 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   send(3, "confirm-area");
   const fallback = await direct;
   assert.equal(fallback.id, 3);
+  assert.equal(fallback.archiveTotal, initial.estimate.total, "switching transfer formats keeps the same footprint");
+  assert(fallback.total > fallback.archiveTotal);
   assert(messages.some(({ type }) => type === "area-fallback"));
   assert(!messages.some(({ id, type }) => id === 3 && type === "area-ready"));
   send(3, "confirm-area");
@@ -295,6 +330,7 @@ test("worker reconfirms GOL fallback, refreshes failed catalogs, and keeps valid
   assert.equal(golOpens, 1, "cancellation never falls back to the GOL");
   await send(62, "estimate-area");
   assert.equal(messages.at(-1).covered, true);
+  assert.deepEqual(messages.at(-1).downloadedWindows, wider.windows);
   assert.equal(messages.at(-1).missing, 0);
 
   downloadFails = true;

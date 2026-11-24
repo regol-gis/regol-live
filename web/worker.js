@@ -7,6 +7,7 @@ import {
 import { isPlanetFile, utcDate } from "./planet-files.js";
 import { ViewportReadAhead } from "./read-ahead.js";
 import { areaIndexFiles, hasNamedAreas } from "./named-areas.js";
+import { TileCountLimit } from "./tile-catalog.js";
 import { AreaDownload } from "./area-download.js";
 import { insideDownloadedArea } from "./viewport.js";
 import { hostedPages, checkParentLookups } from "./site-mode.js";
@@ -19,6 +20,12 @@ const utf8 = new TextDecoder();
 const encoder = new TextEncoder();
 
 function send(message) {
+  if (["area-ready", "area-estimate", "outside-download", "result", "view", "error", "suggestions"].includes(message.type)) {
+    const active = downloadTransport === "gob"
+      ? job.publicPlanet && !gobActive?.invalidated && gobActive
+      : api && source?.url === job.url && !source.invalidated && areaDownload;
+    message.downloadedWindows = active?.downloadedWindows ?? null;
+  }
   postMessage({ ...message, id: job.id });
 }
 
@@ -274,10 +281,10 @@ async function confirmArea(data, area, estimate, details) {
   const { signal } = area.controller;
   signal.throwIfAborted();
   let confirmation;
-  if (data.type !== "estimate-area") {
+  if (data.type !== "estimate-area" && !estimate.limitBytes) {
     confirmation = new Promise((resolve) => { area.confirm = resolve; });
   }
-  send({ type: "area-estimate", ...details, ...estimate, ...stats });
+  send({ type: "area-estimate", windows: job.windows, ...details, ...estimate, ...stats });
   if (!confirmation) return false;
   await confirmation;
   area.confirm = null;
@@ -292,7 +299,7 @@ function golDownload(localFile) {
   }, localFile);
 }
 
-async function gobDownload(data, area) {
+async function gobDownload(data, area, coveredByGol) {
   const { signal } = area.controller;
   let confirmed = false;
   try {
@@ -303,10 +310,12 @@ async function gobDownload(data, area) {
     }
     const entries = gobCatalog.plan(job.windows);
     const estimate = gobCatalog.estimate(entries);
-    if (estimate.missing && api && source.url === data.url && !source.invalidated) {
+    job.archiveTotal = estimate.total;
+    if (coveredByGol) return false;
+    if ((estimate.missing || estimate.limitBytes) && api && source.url === data.url && !source.invalidated) {
       source.signal = signal;
       const warm = await golDownload(false).planFromCache(job.windows);
-      if (warm?.tiles && warm.missing < estimate.missing) return false;
+      if (warm?.tiles && !warm.limitBytes && (estimate.limitBytes || warm.missing < estimate.missing)) return false;
     }
     const covered = downloadTransport === "gol"
       ? source?.url === data.url && !source.invalidated && insideDownloadedArea(areaDownload?.downloadedWindows, job.windows)
@@ -328,7 +337,8 @@ async function gobDownload(data, area) {
     }
     gobRetryAt = 0;
     return true;
-  } catch {
+  } catch (error) {
+    if (error instanceof TileCountLimit) throw error;
     const failed = gobCatalog;
     if (failed?.invalidated) {
       gobActive = null;
@@ -337,7 +347,7 @@ async function gobDownload(data, area) {
     signal.throwIfAborted();
     if (confirmed) gobCatalog = null;
     if (!gobCatalog) gobRetryAt = performance.now() + 60000;
-    if (confirmed) send({ type: "area-fallback", ...stats });
+    if (confirmed) send({ type: "area-fallback", reason: error.message, ...stats });
     return false;
   }
 }
@@ -360,7 +370,7 @@ async function gobQuery(start, request) {
   if (job.downloadedOnly && !insideDownloadedArea(gobActive.downloadedWindows, job.windows)) return false;
   try {
     const entries = gobActive.plan(job.windows);
-    if (entries.length && entries.every(({ loaded }) => loaded)) {
+    if (entries.length && entries.every(({ tip, loaded }) => loaded || gobActive.chunks?.has(tip))) {
       const remaining = () => job.downloadedOnly ? 0 : job.limit - stats.bytes;
       const { value, resultBytes, engineMs } = await gobActive.query(request, remaining, job.signal);
       job.engineMs = engineMs;
@@ -398,7 +408,7 @@ async function run(data, area, suggestion, signal) {
   stats = { gets: 0, bytes: 0, cacheBytes: 0 };
   const allowance = transferAllowance(data.localFile === true);
   job = {
-    id: data.id,
+    id: data.id, url: data.url, publicPlanet: data.publicPlanet === true,
     signal,
     nextYield: start + 16,
     area,
@@ -463,9 +473,9 @@ async function run(data, area, suggestion, signal) {
       job.windows = [...data.request.windows, ...job.windows];
     const coveredByGol = downloadTransport === "gol" && api && source.url === data.url &&
       !source.invalidated && insideDownloadedArea(areaDownload?.downloadedWindows, job.windows);
-    if (publicPlanet && data.gobURL && !suggestion && !coveredByGol) {
-      if (area && (data.type === "plan-area" || performance.now() >= gobRetryAt)) {
-        if (await gobDownload(data, area)) return;
+    if (publicPlanet && data.gobURL && !suggestion && (area || !coveredByGol)) {
+      if (area && (gobCatalog || performance.now() >= gobRetryAt || data.type === "plan-area")) {
+        if (await gobDownload(data, area, coveredByGol)) return;
       }
       if (request && gobActive && !indexedAreas && (!job.downloadedOnly || downloadTransport === "gob")) {
         if (await gobQuery(start, request)) return;
@@ -488,12 +498,13 @@ async function run(data, area, suggestion, signal) {
       signal.throwIfAborted();
       const estimate = await golDownload(data.localFile === true).plan(job.windows);
       const covered = downloadTransport === "gol" && insideDownloadedArea(areaDownload.downloadedWindows, job.windows);
-      if (!await confirmArea(data, area, estimate, { snapshot, modified: source.modified, covered })) return;
+      const details = { snapshot, modified: source.modified, covered, archiveTotal: job.archiveTotal };
+      if (!await confirmArea(data, area, estimate, details)) return;
       const before = stats.bytes;
       await areaDownload.download();
       downloadTransport = "gol";
       signal.throwIfAborted();
-      send({ type: "area-ready", snapshot, ...estimate, covered: estimate.tiles > 0, bytes: stats.bytes - before });
+      send({ type: "area-ready", ...details, ...estimate, covered: estimate.tiles > 0, bytes: stats.bytes - before });
       return;
     }
     if (data.locate) {
@@ -559,6 +570,7 @@ async function run(data, area, suggestion, signal) {
     send({
       type: "error",
       message: error.message,
+      tileLimit: error instanceof TileCountLimit,
       invalidated: usingGol && source?.invalidated === true,
       ...stats,
       timings: queryTimings(),

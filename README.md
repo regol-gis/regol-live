@@ -8,6 +8,8 @@ Open **[live.regol.org](https://live.regol.org/)**, move the map to an area of i
 
 The dataset picker shows the publication date used for area downloads and live queries. Live chooses the newest same-date GOL and GOB available within the last seven UTC dates. If no pair is available, the GOL supplies both. Before a query reads the remote GOL, the site offers to download the visible area or **Run anyway**. Queries served from cache run immediately.
 
+The download button shows the full size of the view and the bytes still to fetch. With a matched pair, the GOB size is the reference as you zoom. Live can use GOL pages already in the browser to reduce the transfer. A dashed blue outline marks the last completed download. Each tab can hold a selected area of up to 256 MiB. The browser keeps the compressed GOB tiles and can use up to 320 MiB for the decoded query data. If a query reaches that limit, zoom in and run it again using the same download.
+
 Choose **Overpass QL** and run this query to count attractions inside Disneyland, from any map viewport.
 
 ```overpass

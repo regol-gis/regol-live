@@ -1,10 +1,10 @@
 import { blockBytes } from "./range-cache.js";
 import { pageBytes } from "./ranges.js";
 import { readBlocks, readPages } from "./read-ahead.js";
-import { projectedBox, readCatalog, tileEnd, tileStarts } from "./tile-catalog.js";
+import { projectedBox, readCatalog, tileEnd, tileStarts, TileCountLimit } from "./tile-catalog.js";
 
 // Keep the complete selected area available even on memory-only origins.
-const maxAreaBytes = 128 * 1024 * 1024;
+export const maxAreaBytes = 256 * 1024 * 1024;
 const maxHeaders = 256;
 const align = (offset, width) => Math.floor(offset / width) * width;
 
@@ -45,15 +45,6 @@ export class AreaDownload {
     if (!this.headers.has(start)) this.headers.set(start, bytes.slice());
   }
 
-  addPages(start, end) {
-    const limit = Math.min(this.source.size, Math.ceil(end / this.width) * this.width);
-    for (let p = align(start, this.width); p < limit; p += pageBytes) {
-      this.pages.add(p);
-      if (this.pages.size * pageBytes > maxAreaBytes)
-        throw Error("This area exceeds the 128 MiB download cache. Zoom in to select fewer tiles.");
-    }
-  }
-
   async planFromCache(windows) {
     const { source } = this;
     const reader = {
@@ -87,8 +78,7 @@ export class AreaDownload {
         starts.add(start);
       }
     }
-    if (starts.size > maxHeaders) throw Error("Zoom in to download fewer tiles.");
-    this.plannedWindows = windows;
+    if (starts.size > maxHeaders) throw new TileCountLimit(maxHeaders);
     const headerBlocks = new Set([...starts].map((p) => align(p, blockBytes)));
     for (const p of this.headers.keys()) {
       const inDirectory = p < catalog.directory[1] && p + blockBytes > catalog.directory[0];
@@ -96,18 +86,34 @@ export class AreaDownload {
     }
     await readBlocks(reader, headerBlocks, this.memory, (p, bytes) => this.keepHeader(p, bytes));
     // A completed download retains its own page set while the next view is sized.
-    this.pages = new Set();
-    this.addPages(0, catalog.metadataEnd);
-    this.addPages(...catalog.directory);
+    const spans = [[0, catalog.metadataEnd], catalog.directory];
     for (const start of starts) {
       const block = align(start, blockBytes);
       const header = this.headers.get(block).subarray(start - block);
-      this.addPages(start, tileEnd(catalog, source.size, start, header));
+      spans.push([start, tileEnd(catalog, source.size, start, header)]);
     }
-    let total = 0, missing = 0;
+    // Count the union of aligned pages, including the short final page. Large
+    // views need only their extents to report a size and decline the download.
+    const ranges = [];
+    let total = 0;
+    for (const [start, end] of spans.sort((a, b) => a[0] - b[0])) {
+      const left = Math.max(align(start, this.width), ranges.at(-1)?.[1] ?? 0);
+      const right = Math.min(source.size, Math.ceil(end / this.width) * this.width);
+      if (left < right) {
+        ranges.push([left, right]);
+        total += right - left;
+      }
+    }
+    this.plannedWindows = null;
+    this.pages = new Set();
+    if (total > maxAreaBytes)
+      return { tiles: starts.size, total, missing: null, limitBytes: maxAreaBytes };
+    for (const [left, right] of ranges)
+      for (let p = left; p < right; p += pageBytes) this.pages.add(p);
+    this.plannedWindows = windows;
+    let missing = 0;
     for (const page of this.pages) {
       const end = Math.min(source.size, page + pageBytes);
-      total += end - page;
       if (ahead.pages.has(page)) continue;
       for (let p = page; p < end; p += blockBytes)
         if (!this.stored(p) && !this.memory(p)) missing += Math.min(blockBytes, end - p);
@@ -116,9 +122,10 @@ export class AreaDownload {
   }
 
   async download() {
+    if (!this.plannedWindows) throw Error("Select a smaller area before downloading.");
     const { source, ahead } = this;
     const missing = [...this.pages].filter((start) => !ahead.pages.has(start));
-    const buffers = await readPages(source, missing, this.memory);
+    const buffers = await readPages(source, missing, this.memory, true);
     source.signal?.throwIfAborted();
     // Publish only complete pages. A failed download leaves the previous area
     // usable, and successfully persisted ranges can be reused on retry.

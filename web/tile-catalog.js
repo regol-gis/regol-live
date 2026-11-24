@@ -5,6 +5,12 @@ const maxTiles = 32;
 
 export class UnsupportedCatalog extends Error {}
 
+export class TileCountLimit extends UnsupportedCatalog {
+  constructor(limit) {
+    super(`This view covers more than ${limit} tiles. Zoom in to download a smaller area.`);
+  }
+}
+
 function check(condition) {
   if (!condition) throw new UnsupportedCatalog("Could not read the GOL tile directory or extents.");
 }
@@ -85,7 +91,7 @@ export function tileStarts({ bytes, zooms }, [west, north, east, south], limit =
     const start = (word >>> 2) * page;
     check(!tiles.has(start));
     if (tiles.size >= limit)
-      throw new UnsupportedCatalog("Too many tiles in this view. Zoom in to download a smaller area.");
+      throw new TileCountLimit(limit);
     tiles.set(start, zoom);
     onTile?.(start, entry);
     if (!branch && level !== 0) return;

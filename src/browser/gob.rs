@@ -7,7 +7,7 @@ use serde_json::json;
 use std::cell::RefCell;
 
 const MAX_COMPRESSED_INPUT: usize = 128 * 1024 * 1024;
-const MAX_STORE_BYTES: usize = 192 * 1024 * 1024;
+const MAX_STORE_BYTES: usize = 320 * 1024 * 1024;
 const MAX_AREA_TILES: usize = 256;
 
 thread_local! {
@@ -90,7 +90,7 @@ pub extern "C" fn gob_plan(w: f64, s: f64, e: f64, n: f64) -> usize {
         let bounds = project_box([w, s, e, n])?;
         let tips = store.catalog().tiles_in_bounds(bounds);
         if tips.len() > MAX_AREA_TILES {
-            return Err("Zoom in to download fewer tiles.".into());
+            return Ok(output(&json!({ "tileLimit": MAX_AREA_TILES })));
         }
         let tiles = tips
             .into_iter()
@@ -114,6 +114,12 @@ pub extern "C" fn gob_import(tip: u32) -> usize {
         };
         match store.import_tile(tip, &chunk) {
             Ok(()) => 0,
+            Err(regol::Error::Limit(
+                "uncompressed GOB chunk bytes" | "converted GOB tile bytes" | "retained GOB store bytes",
+            )) => output(&json!({
+                "error": format!("This query needs more than {} MiB of decoded tiles. Zoom in to query a smaller area. Your download is still available.", MAX_STORE_BYTES / (1024 * 1024)),
+                "decodedLimit": true,
+            })),
             Err(error) => output(&json!({ "error": error.to_string() })),
         }
     })

@@ -716,20 +716,24 @@ try {
     assert.deepEqual((await page.locator(".result small").allTextContents()).sort(), ids, query);
   }
   smallTransferAllowance = true;
-  const paused = await browser.newPage({
-    viewport: { width: 1280, height: 800 },
-  });
-  await paused.goto(base + "/?dataset=monaco");
-  await paused.click("#run");
-  const resume = paused.locator("#continue-query");
-  await resume.waitFor();
-  assert.match(await paused.textContent("#status"), /transfer limit/);
-  await paused.click("#cancel");
-  assert(await resume.isHidden());
-  assert.match(await paused.textContent("#status"), /cancelled/);
+  // Cancellation may retain enough IndexedDB blocks for a second query to
+  // finish below its allowance. Exercise resume with a separate cold context.
+  const startLimitedQuery = async () => {
+    const tab = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+    await tab.goto(base + "/?dataset=monaco", { waitUntil: "domcontentloaded" });
+    await tab.click("#run");
+    await tab.locator("#continue-query").waitFor();
+    return tab;
+  };
+  const cancelled = await startLimitedQuery();
+  assert.match(await cancelled.textContent("#status"), /transfer limit/);
+  await cancelled.click("#cancel");
+  assert(await cancelled.locator("#continue-query").isHidden());
+  assert.match(await cancelled.textContent("#status"), /cancelled/);
+  await cancelled.close();
   sampleReads.length = 0;
-  await paused.click("#run");
-  await resume.waitFor();
+  const paused = await startLimitedQuery();
+  const resume = paused.locator("#continue-query");
   assert(sampleReads.length < genericReads.length);
   await resume.click();
   await paused.waitForFunction(() =>

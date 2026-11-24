@@ -13,6 +13,9 @@ categories = ["science::geo", "command-line-utilities"]
 license = "Apache-2.0"
 include = ["/build.rs", "/src/**", "/web/**", "/docs/**", "/tests/*.rs", "/tests/fixtures/**", "/LICENSE", "/README.md", "/Cargo.lock"]
 
+[features]
+range-reader = []
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
@@ -36,5 +39,9 @@ inherits = "release"
 lto = true
 opt-level = "s"
 strip = true
+
+[patch.crates-io]
+# Keep the engine shared with regol-overpass until the resumable API is released.
+regol = { git = "https://github.com/regol-gis/regol.git", rev = "9d9ed5bcbfc0c53384a533f8c3cec2ad082b05b5" }
 
 [workspace]

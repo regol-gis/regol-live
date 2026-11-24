@@ -1,4 +1,6 @@
 //! Render ordered query results for the Live map.
+#[cfg(all(target_arch = "wasm32", feature = "range-reader"))]
+pub(crate) mod scheduled;
 use crate::Request;
 use regol::{Error, Feature, Geometry, Library, source::Source};
 use regol_overpass::{

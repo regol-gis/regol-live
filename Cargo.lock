@@ -561,8 +561,7 @@ checksum = "d902046e6a28a1e4c3cab97258a0ce11e994903f01c2d97a9447a0b3df85f4f6"
 [[package]]
 name = "regol"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4aab3d80e49f9aeba91454f32904e8f7701213b6b094fb50da3b5a4e28c950e5"
+source = "git+https://github.com/regol-gis/regol.git?rev=9d9ed5bcbfc0c53384a533f8c3cec2ad082b05b5#9d9ed5bcbfc0c53384a533f8c3cec2ad082b05b5"
 dependencies = [
  "crc32c",
  "flate2",

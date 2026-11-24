@@ -18,27 +18,18 @@ const { stdout } = await promisify(execFile)("cargo", [
 const { version } = JSON.parse(stdout).packages.find((pkg) => pkg.name === "regol-live");
 const build = { version, revision, dirty: status === null ? null : status !== "" };
 
-execFileSync(
-  "cargo",
-  [
-    "build",
-    "--locked",
-    "--lib",
-    "--profile",
-    "wasm",
-    "--target",
-    "wasm32-unknown-unknown",
-    "--target-dir",
-    "target",
-  ],
-  { stdio: "inherit" },
-);
 await mkdir(dist, { recursive: true });
 await cp("web", dist, { recursive: true });
-await cp(
-  "target/wasm32-unknown-unknown/wasm/regol_live.wasm",
-  join(dist, "regol-live.wasm"),
-);
+for (const [file, features] of [
+  ["regol-live.wasm", []],
+  ["regol-live-range.wasm", ["--features", "range-reader"]],
+]) {
+  execFileSync("cargo", [
+    "build", "--locked", "--lib", "--profile", "wasm", "--target", "wasm32-unknown-unknown",
+    "--target-dir", "target", ...features,
+  ], { stdio: "inherit" });
+  await cp("target/wasm32-unknown-unknown/wasm/regol_live.wasm", join(dist, file));
+}
 function buildAreaIndex(gol, output) {
   execFileSync(
     "cargo",

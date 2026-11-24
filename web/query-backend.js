@@ -82,7 +82,7 @@ export class RangeQueries {
   }
 
   resume() {
-    this.worker?.postMessage({ type: "continue" });
+    this.worker?.postMessage({ type: "continue", id: this.id });
   }
 
   cancel({ reuseSource, keepDownload = false } = {}) {

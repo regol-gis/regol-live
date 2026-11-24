@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { text } from "node:stream/consumers";
 import sirv from "sirv";
 import { checkGobArea } from "./gob-area.mjs";
+import { checkPlanetReader } from "./planet-reader.mjs";
 import { checkHostedPages } from "./hosted-pages.mjs";
 import { checkNative } from "./native-browser.mjs";
 import { checkMapExport } from "./map-export.mjs";
@@ -86,6 +87,8 @@ const browser = await chromium.launch({
   ],
 });
 try {
+  await checkPlanetReader(browser, base, sample);
+  sampleReads.length = 0;
   await checkGobArea(browser, base);
   const page = await browser.newPage({
     viewport: { width: 1280, height: 800 },

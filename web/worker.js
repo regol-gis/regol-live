@@ -1,3 +1,4 @@
+import { CursorReader, cursorImports, rangeModule } from "./range-reader.js";
 import {
   RangeFile,
   summarizeReadTimings,
@@ -62,12 +63,12 @@ function reportRead(transport, length, timing) {
   }
 }
 
-async function newEngine(range) {
-  wasmModule ??= WebAssembly.compileStreaming(fetch("./regol-live.wasm")).catch((error) => {
+async function newEngine(range, compiled) {
+  const module = compiled ?? (wasmModule ??= WebAssembly.compileStreaming(fetch("./regol-live.wasm")).catch((error) => {
     wasmModule = null;
     throw error;
-  });
-  const instance = await WebAssembly.instantiate(await wasmModule, {
+  }));
+  const instance = await WebAssembly.instantiate(await module, {
     range: {
       fetch_area_file: () => -1, copy_area_file: () => 0,
       query_stopped: new WebAssembly.Suspending(checkQuery), ...range,
@@ -89,27 +90,51 @@ function checkQuery() {
   return new Promise(resolve => setTimeout(() => resolve(Number(job.signal.aborted)), 0));
 }
 
-function beforeGolNetwork(current) {
-  current.signal.throwIfAborted();
+function beforeGolNetwork(current, signal = current.signal) {
+  signal.throwIfAborted();
   if (!current.warnLiveGol) return;
   if (!current.golDecision) {
     // Parallel prefetches share one decision for this query.
     const paused = performance.now();
     current.golDecision = new Promise(resolve => {
       current.allowGol = resolve;
-      current.signal.addEventListener("abort", resolve, { once: true });
+      signal.addEventListener("abort", resolve, { once: true });
     }).then(() => {
-      current.signal.removeEventListener("abort", current.allowGol);
+      signal.removeEventListener("abort", current.allowGol);
       current.allowGol = null;
       current.warnLiveGol = false;
       current.pausedBefore = performance.now() - paused;
       current.pausedMs += current.pausedBefore;
       if (current.locateUntil) current.locateUntil += current.pausedBefore;
-      current.signal.throwIfAborted();
+      signal.throwIfAborted();
     });
     send({ type: "confirm-live-gol" });
   }
   return current.golDecision;
+}
+
+// Each allowance is granted once, including when several queued reads reach it together.
+function extendTransfer(current, signal) {
+  signal.throwIfAborted();
+  if (!current.interactive) throw Error(
+    "GOL transfer limit reached. Narrow the selector or reference query. Large features can extend beyond the map view.",
+  );
+  if (!current.transferDecision) {
+    const paused = performance.now();
+    current.transferDecision = new Promise(resolve => {
+      current.resume = resolve;
+      signal.addEventListener("abort", resolve, { once: true });
+    }).then(() => {
+      signal.removeEventListener("abort", current.resume);
+      current.resume = current.transferDecision = null;
+      signal.throwIfAborted();
+      current.pausedBefore = performance.now() - paused;
+      current.pausedMs += current.pausedBefore;
+      current.limit += current.allowance;
+    });
+    send({ type: "transfer-limit", ...stats, allowance: current.allowance });
+  }
+  return current.transferDecision;
 }
 
 async function open(url, localFile, expectedDate) {
@@ -126,7 +151,7 @@ async function open(url, localFile, expectedDate) {
     measureStorage,
   );
   source.signal = job.signal;
-  source.beforeNetwork = () => beforeGolNetwork(job);
+  source.beforeNetwork = () => beforeGolNetwork(job, source.signal);
   const remaining = () => job.limit - stats.bytes;
   const getPage = new WebAssembly.Suspending(
     async (offset, destination, length, sparse) => {
@@ -143,6 +168,7 @@ async function open(url, localFile, expectedDate) {
           new Uint8Array(api.memory.buffer, destination, length).set(cached);
           return 1;
         }
+        if (job.cursors) return await job.cursors.copy(start, length, api.memory, destination);
         let page =
           ahead.get(start, length) ?? (await source.cached(start, length));
         if (!job.suggestion && !job.area && !job.locate && !sparse && !page && start !== 0 && !source.first) {
@@ -187,23 +213,7 @@ async function open(url, localFile, expectedDate) {
               job.suggestion.limited = true;
               return 0;
             }
-            if (!job.interactive)
-              throw new Error(
-                "GOL transfer limit reached. Narrow the selector or reference query. Large features can extend beyond the map view.",
-              );
-            const paused = performance.now();
-            await new Promise((resolve) => {
-              job.resume = resolve;
-              send({
-                type: "transfer-limit",
-                ...stats,
-                allowance: job.allowance,
-              });
-            });
-            job.signal.throwIfAborted();
-            job.pausedBefore = performance.now() - paused;
-            job.pausedMs += job.pausedBefore;
-            job.limit += job.allowance;
+            await extendTransfer(job, job.signal);
           }
           page = await source.fetchRange(start, length);
           if (!sparse && ahead.pages.size < 4) ahead.remember(start, page);
@@ -223,7 +233,9 @@ async function open(url, localFile, expectedDate) {
   // Complete the consent-gated open before starting the engine. Either failure
   // can then finish this job without leaving an orphaned read or dialog.
   await source.open(expectedDate);
+  const scheduled = isPlanetFile(url, "gol");
   api = await newEngine({
+    ...(scheduled && cursorImports(() => job.cursors, () => api)),
     get_page: getPage,
     suggestion_stopped: new WebAssembly.Suspending(checkSuggestion),
     fetch_area_file: new WebAssembly.Suspending(async (...args) => {
@@ -235,7 +247,7 @@ async function open(url, localFile, expectedDate) {
       }
     }),
     copy_area_file: areaFiles.copy_area_file,
-  });
+  }, scheduled ? rangeModule() : undefined);
   // Without a validator, decoded geometry is reusable only within this open.
   snapshot = JSON.stringify([
     source.size,
@@ -502,14 +514,39 @@ async function run(data, area, suggestion, signal) {
       return;
     }
     job.pageMs = 0;
+    if (isPlanetFile(data.url, "gol") && !job.downloadedOnly) {
+      let committed = stats.bytes;
+      job.cursors = new CursorReader(source, ahead, signal, data.request, async (length, readSignal) => {
+        await beforeGolNetwork(job, readSignal);
+        // Concurrent reads reserve their bytes before issuing a GET.
+        while (committed + length > job.limit) await extendTransfer(job, readSignal);
+        committed += length;
+      }, ms => { job.pageMs += ms; });
+      source.signal = job.cursors.signal;
+    }
     const queryStart = performance.now();
     let resultBytes;
     try {
-      resultBytes = await WebAssembly.promising(api.query)();
+      const query = WebAssembly.promising(api.query);
+      if (job.cursors?.planning) {
+        // This pass visits checked spatial indexes and skips payload emission.
+        const planBytes = await query();
+        signal.throwIfAborted();
+        if (job.cursors.error) throw job.cursors.error;
+        result(planBytes);
+        job.cursors.planning = false;
+      }
+      resultBytes = await query();
     } finally {
+      if (job.cursors) {
+        await job.cursors.close();
+        source.signal = signal;
+      }
       job.engineMs = Math.max(0, performance.now() - queryStart - job.pageMs);
     }
     signal.throwIfAborted();
+    if (job.cursors?.error) throw job.cursors.error;
+    if (source.invalidated) throw Error(transferError || "The dataset changed. Run the query again to reopen it.");
     if (job.missingPage) return send({ type: "outside-download" });
     sendResult(result(resultBytes), resultBytes, snapshot, start);
   } catch (error) {
@@ -517,7 +554,7 @@ async function run(data, area, suggestion, signal) {
     if (!area && !suggestion && signal.aborted && !source?.invalidated && !(error instanceof WebAssembly.RuntimeError)) return;
     if (job.missingPage) return send({ type: "outside-download" });
     // On an interrupted transfer or failed open the next job gets a fresh source.
-    if (usingGol && (transferError || source?.invalidated || error instanceof WebAssembly.RuntimeError))
+    if (usingGol && ((transferError && !job.cursors) || source?.invalidated || error instanceof WebAssembly.RuntimeError))
       api = null;
     send({
       type: "error",
@@ -528,6 +565,7 @@ async function run(data, area, suggestion, signal) {
     });
   } finally {
     clearTimeout(timer);
+    job.cursors = undefined;
     if (pendingSuggestion === suggestion) pendingSuggestion = null;
     if (source) source.signal = undefined;
     if (pendingArea === area) pendingArea = null;
@@ -543,7 +581,6 @@ onmessage = ({ data }) => {
   }
   if (data.type === "cancel-query") {
     queries.get(data.id)?.abort();
-    if (job?.id === data.id) job.resume?.();
     return;
   }
   if (data.type === "cancel-suggestion") {
@@ -551,8 +588,7 @@ onmessage = ({ data }) => {
     return;
   }
   if (data.type === "continue") {
-    job?.resume?.();
-    if (job) job.resume = null;
+    if (job?.id === data.id || data.id === undefined) job?.resume?.();
     return;
   }
   if (data.type === "confirm-area" || data.type === "cancel-area") {

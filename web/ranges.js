@@ -4,7 +4,7 @@ export { planetURL } from "./planet-files.js";
 
 export const pageBytes = 128 * 1024;
 export const transferAllowance = (localFile) =>
-  (localFile ? 256 : 48) * 1024 * 1024;
+  (localFile ? 256 : 128) * 1024 * 1024;
 const options = {
   credentials: "omit",
   cache: "no-store",

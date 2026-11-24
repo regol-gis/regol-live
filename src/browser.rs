@@ -1,5 +1,7 @@
 #[cfg(target_arch = "wasm32")]
 mod gob;
+#[cfg(all(target_arch = "wasm32", feature = "range-reader"))]
+mod schedule;
 
 use crate::{MAX_REQUEST_BYTES, Request, execute_cancellable, query_limits};
 use regol::{DictionaryLoading, Library, source::Source};
@@ -73,6 +75,8 @@ struct Cache {
     ahead_left: usize,
 }
 struct Pages {
+    #[cfg(all(target_arch = "wasm32", feature = "range-reader"))]
+    schedule: schedule::Schedule,
     local: bool,
     cache_bytes: usize,
     size: u64,
@@ -159,6 +163,11 @@ impl Pages {
 }
 
 impl Source for Pages {
+    #[cfg(all(target_arch = "wasm32", feature = "range-reader"))]
+    fn range_query(&self) -> Option<&dyn regol::source::RangeQuery<Self>> {
+        Some(self)
+    }
+
     fn len(&self) -> u64 {
         self.size
     }
@@ -263,6 +272,8 @@ pub extern "C" fn input_buffer(size: usize) -> *mut u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn open_gol(size: u64, local: bool) -> usize {
     let source = Pages {
+        #[cfg(all(target_arch = "wasm32", feature = "range-reader"))]
+        schedule: Default::default(),
         local,
         cache_bytes: (if local { 64 } else { 32 }) * 1024 * 1024,
         size,
@@ -357,32 +368,44 @@ fn read_area_file(path: &str, limit: usize, source: &impl Source) -> Result<Vec<
     Ok(bytes)
 }
 
+fn query_request(_lib: &Library<Pages>) -> Result<Request, String> {
+    let request = INPUT
+        .with_borrow(|buf| serde_json::from_slice::<Request>(buf))
+        .map_err(|error| error.to_string())?;
+    #[cfg(target_arch = "wasm32")]
+    let request = {
+        let mut request = request;
+        if let Some(program) = request.program_mut() {
+            regol_overpass::area_index::hydrate_from(
+                program,
+                _lib.source(),
+                |path, limit| read_area_file(path, limit, _lib.source()),
+                &cancellation_check(),
+            )?;
+        }
+        request
+    };
+    Ok(request)
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn query() -> usize {
-    let request = INPUT.with_borrow(|buf| serde_json::from_slice::<Request>(buf));
-    let result = request.map_err(|e| e.to_string()).and_then(|req| {
-        SOURCE.with_borrow(|lib| {
-            let lib = lib.as_ref().ok_or("Open a dataset first.")?;
-            {
-                let mut cache = lib.source().cache.borrow_mut();
-                cache.query_id += 1;
-                cache.ahead_left = LOCAL_AHEAD_PAGES;
-            }
-            #[cfg(target_arch = "wasm32")]
-            let req = {
-                let mut req = req;
-                if let Some(program) = req.program_mut() {
-                    regol_overpass::area_index::hydrate_from(
-                        program,
-                        lib.source(),
-                        |path, limit| read_area_file(path, limit, lib.source()),
-                        &cancellation_check(),
-                    )?;
-                }
-                req
-            };
-            execute_cancellable(lib, req, &cancellation_check())
-        })
+    let result = SOURCE.with_borrow(|lib| {
+        let lib = lib.as_ref().ok_or("Open a dataset first.")?;
+        {
+            let mut cache = lib.source().cache.borrow_mut();
+            cache.query_id += 1;
+            cache.ahead_left = LOCAL_AHEAD_PAGES;
+        }
+        let request = query_request(lib)?;
+        #[cfg(all(target_arch = "wasm32", feature = "range-reader"))]
+        {
+            schedule::execute(lib, request)
+        }
+        #[cfg(not(all(target_arch = "wasm32", feature = "range-reader")))]
+        {
+            execute_cancellable(lib, request, &cancellation_check())
+        }
     });
     match result {
         Ok(results) => output(&results),
